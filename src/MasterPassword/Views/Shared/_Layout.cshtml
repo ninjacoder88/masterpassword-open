@@ -1,0 +1,29 @@
+﻿@using Microsoft.AspNetCore.Http
+@using MasterPassword
+@{
+    var isLoggedIn = Context.Session.GetString("IsLoggedIn");
+}
+<!DOCTYPE html>
+<html lang="en" class="h-100">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <link rel="icon" type="image/png" href="~/favicon.png" />
+    <link rel="stylesheet" href="~/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.3.0/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="~/css/masterpassword.css" />
+    <title>@ViewData["Title"]</title>
+</head>
+<body class="h-100 d-flex flex-column">
+
+    @RenderBody()
+
+    <div id="modals"></div>
+
+    <input type="hidden" id="app-version" value="@AppVersion.QueryString" />
+
+    <script type="text/javascript" src="~/js/lib/require-2.3.6.min.js"></script>
+    <script type="text/javascript" src="~/js/requireConfig.js?@AppVersion.QueryString"></script>
+    @RenderSection("Scripts", false)
+</body>
+</html>

@@ -1,0 +1,206 @@
+﻿@using MasterPassword
+@model MasterPassword.Controllers.AccountsModel
+@{
+    ViewData["Title"] = "Accounts";
+    Layout = "~/Views/Shared/_Layout.cshtml";
+}
+
+@section Scripts{
+    <script type="text/javascript" src="~/js/app/AccountsViewModel.js?@AppVersion.QueryString"></script>
+}
+
+<div class="container-fluid" id="container">
+    <h3 class="text-white mb-3">Welcome, @Model.Username</h3>
+
+    <div class="row">
+        <div class="col-md-6">
+            <input type="text" class="form-control mb-3" id="filter-text" placeholder="Account Name" data-bind="value: filterText" />
+        </div>
+        <div class="col-md-6">
+            <select class="form-control" data-bind="options: categories, value: selectedCategory, optionsCaption: 'Choose Category'"></select>
+        </div>
+    </div>
+    
+
+    <div class="row" data-bind="foreach: accounts">
+        <div class="col-12 col-sm-6 col-md-4 col-lg-3 col-xl-2">
+            <div class="card mb-3 bg-info">
+                <div class="card-body" data-bind="click: launch">
+                    <img class="img-fluid float-start me-3" data-bind="attr: {src: favicon}" alt="favicon" style="max-height: 32px" />
+                    <div data-bind="with: accountName" class="p-2">
+                        <strong data-bind="text: value"></strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card bg-dark text-white mb-3" style="width: 18rem;">
+        <div class="card-header" data-bs-toggle="collapse" href="#newAccountCollapse">
+            <span>New Account</span>
+        </div>
+        <div class="card-body collapse" id="newAccountCollapse">
+            <div class="form-group">
+                <label for="newAccountName">Account Name</label>
+                <input type="text" class="form-control" id="newAccountName" data-bind="value: accountName" />
+            </div>
+            <div class="form-group">
+                <label for="newAccountUsername">Username</label>
+                <input type="text" class="form-control" id="newAccountUsername" data-bind="value: username" />
+            </div>
+            <div class="form-group">
+                <label for="newAccountPassword">Password</label>
+                <input type="text" class="form-control" id="newAccountPassword" data-bind="value: password" />
+            </div>
+            <div class="form-group">
+                <label for="newAccountUrl">URL</label>
+                <input type="text" class="form-control" id="newAccountUrl" data-bind="value: url" />
+            </div>
+            <br />
+            <button type="button" class="btn btn-success" data-bind="click: addAccount, enable: addAccountEnabled">Add Account</button>
+            <hr />
+            <div class="row mb-3">
+                <label for="inputEmail3" class="col col-form-label">Length</label>
+                <div class="col">
+                    <input type="number" class="form-control" id="inputEmail3" data-bind="value: plength">
+                </div>
+            </div>
+            <div class="row mb-3">
+                <div class="col">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="gridCheckUpper" data-bind="checked: upper">
+                        <label class="form-check-label" for="gridCheckUpper">Uppercase</label>
+                    </div>
+                </div>
+                <div class="col">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="gridCheckLower" data-bind="checked: lower" disabled>
+                        <label class="form-check-label" for="gridCheckLower">Lowercase</label>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-3">
+                <div class="col">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="gridCheckNum" data-bind="checked: number">
+                        <label class="form-check-label" for="gridCheckNum">Number</label>
+                    </div>
+                </div>
+                <div class="col">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="gridCheckSpecial" data-bind="checked: special">
+                        <label class="form-check-label" for="gridCheckSpecial">Special</label>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-info" data-bind="click: generate">Generate Password</button>
+        </div>
+    </div>
+
+    <input type="text" id="copyField" style="display:none" />
+
+    <div class="modal fade" id="accountModal" tabindex="-1" aria-labelledby="accountModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content bg-secondary text-white" data-bind="with: selectedAccount">
+                <div class="modal-header">
+                    <div class="h4 modal-title" id="accountModalLabel" data-bind="with: accountName">
+                        <span data-bind="text: value"></span>
+                        <span class="ms-4">
+                            <i class="bi-pencil" data-bind="hidden: editing, click: edit"></i>
+                            @* <i class="bi-clipboard" data-bind="hidden: editing, click: copy"></i> *@
+                            <i class="bi-check" data-bind="visible: editing, click: save"></i>
+                            <i class="bi-x" data-bind="visible: editing, click: cancel"></i>
+                        </span>
+                        <input type="text" class="form-control" data-bind="value: value, hidden: editing() === false, attr: {id: eid}" style="font-size: 12px"/>
+                    </div>
+                    <br/>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group mb-2" data-bind="with: category">
+                        <label data-bind="text: title, attr: {for: eid}"></label>
+                        <span class="float-end">
+                            <i class="bi-pencil" data-bind="hidden: editing, click: edit"></i>
+                            <i class="bi-check" data-bind="visible: editing, click: save"></i>
+                            <i class="bi-x" data-bind="visible: editing, click: cancel"></i>
+                        </span>
+                        <input type="text" class="form-control" data-bind="value: value, attr: {id: eid, readonly: editing() === false}" style="font-size: 12px"/>
+                    </div>
+                    <div class="form-group mb-2" data-bind="with: username">
+                        <label data-bind="text: title, attr: {for: eid}"></label>
+                        <span class="float-end">
+                            <i class="bi-pencil" data-bind="hidden: editing, click: edit"></i>
+                            <i class="bi-clipboard" data-bind="hidden: editing, click: copy"></i>
+                            <i class="bi-check" data-bind="visible: editing, click: save"></i>
+                            <i class="bi-x" data-bind="visible: editing, click: cancel"></i>
+                        </span>
+                        <input type="text" class="form-control" data-bind="value: value, attr: {id: eid, readonly: editing() === false}" style="font-size: 12px" />
+                    </div>
+                    <div class="form-group mb-2" data-bind="with: password">
+                        <label data-bind="text: title, attr: {for: eid}"></label>
+                        <span class="float-end">
+                            <i class="bi-pencil" data-bind="hidden: editing, click: edit"></i>
+                            <i class="bi-clipboard" data-bind="hidden: editing, click: copy"></i>
+                            <i class="bi-check" data-bind="visible: editing, click: save"></i>
+                            <i class="bi-x" data-bind="visible: editing, click: cancel"></i>
+                        </span>
+                        <input type="text" class="form-control" data-bind="value: value, attr: {id: eid, readonly: editing() === false}" style="font-size: 12px" />
+                    </div>
+                    <div class="form-group mb-2" data-bind="with: url">
+                        <label data-bind="text: title, attr: {for: eid}"></label>
+                        <span class="float-end">
+                            <i class="bi-pencil" data-bind="hidden: editing, click: edit"></i>
+                            <i class="bi-clipboard" data-bind="hidden: editing, click: copy"></i>
+                            <i class="bi-check" data-bind="visible: editing, click: save"></i>
+                            <i class="bi-x" data-bind="visible: editing, click: cancel"></i>
+                        </span>
+                        <div class="input-group mb-2">
+                            <input type="text" class="form-control" data-bind="value: value, attr: {id: eid, readonly: editing() === false}" style="font-size: 12px" />
+                            <button type="button" class="btn btn-outline-info" data-bind="click: $parent.openSite">Go</button>
+                        </div>
+                    </div>
+
+                    <hr />
+
+                    <div data-bind="foreach: notes">
+                        <div class="form-group mb-2">
+                            <label data-bind="text: title, hidden: editing"></label>
+                            <span class="float-end">
+                                <i class="bi-pencil" data-bind="hidden: editing, click: edit"></i>
+                                <i class="bi-clipboard" data-bind="hidden: editing, click: copy"></i>
+                                <i class="bi-check" data-bind="visible: editing, click: save"></i>
+                                <i class="bi-x" data-bind="visible: editing, click: cancel"></i>
+                                <i class="bi-trash" data-bind="click: $parent.deleteNote"></i>
+                            </span>
+                            <input type="text" data-bind="value: title, visible: editing" />
+                            <input type="text" class="form-control" data-bind="value: details, attr: {id: id, readonly: editing() === false}" style="font-size: 12px" />
+                        </div>
+                    </div>
+
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-primary btn-sm" data-bind="click: addNote">Add Note</button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-danger" data-bind="click: deleteAccount">Delete</button>
+                    <button type="button" class="btn btn-outline-dark" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div><!--/modal-content-->
+        </div><!--/modal-dialog-->
+    </div><!--/modal-->
+
+    <div class="modal fade" tabindex="-1" id="sessionModal">
+        <div class="modal-dialog modal-sm">
+            <div class="modal-content bg-info">
+                <div class="modal-header">
+                    <h5 class="modal-title">Session Expiration</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Your session expires soon. To extend your session please click Continue</p>
+                    <button type="button" class="btn btn-primary" data-bind="click: continueSession" data-bs-dismiss="modal">Continue</button>
+                </div>
+            </div><!--/modal-content-->
+        </div><!--/modal-dialog-->
+    </div><!--/modal-->
+</div>
