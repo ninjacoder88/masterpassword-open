@@ -1,0 +1,49 @@
+{
+  "instruction": "Use parameterized queries for all database operations, always prefer ORM built-in query methods over raw SQL, and use textContent/DOM API instead of innerHTML for rendering",
+  "relevant_when": "Agent writes database queries, ORM code with user-provided values, or renders user data in the DOM",
+  "context": "String interpolation in SQL queries allows SQL injection. Always use parameterized queries (? placeholders or equivalent). When using ORMs like Prisma, Sequelize, or SQLAlchemy, ALWAYS prefer built-in query methods (findMany with contains for LIKE queries, findAll, filter) over raw query escape hatches ($queryRaw, $queryRawUnsafe, sequelize.query with interpolation, text() with f-strings). Built-in ORM methods can handle LIKE/contains queries -- use prisma.product.findMany({ where: { name: { contains: search } } }) instead of $queryRaw. If raw queries are absolutely necessary, always use bound parameters. For frontend rendering, NEVER use innerHTML with user data even if escaped -- always use textContent for text content and createElement+appendChild for structured DOM. In React, never use dangerouslySetInnerHTML; in Vue, never use v-html with user data.",
+  "sources": [
+    {
+      "type": "file",
+      "filename": "skills/input-sanitization/SKILL.md",
+      "tile": "tessl-labs/input-sanitization@0.1.3"
+    }
+  ],
+  "checklist": [
+    {
+      "name": "no-string-interpolation-sql",
+      "rule": "Agent never uses string interpolation, concatenation, or template literals to build SQL queries with user input. Always uses parameterized queries with ? or $1 placeholders.",
+      "relevant_when": "Agent writes SQL queries with user input"
+    },
+    {
+      "name": "orm-builtin-methods-preferred",
+      "rule": "Agent uses ORM built-in query methods instead of raw SQL. Specifically: for Prisma, uses findMany/findUnique/create with where clauses (including { contains: search } for LIKE queries) instead of $queryRaw or $queryRawUnsafe. For Sequelize, uses findAll/findOne with Op operators instead of sequelize.query. For SQLAlchemy, uses query().filter() with .like() instead of text(). Raw queries are only acceptable when the built-in methods genuinely cannot express the query.",
+      "relevant_when": "Agent writes database queries using an ORM"
+    },
+    {
+      "name": "raw-query-uses-parameters",
+      "rule": "When ORM raw queries are truly unavoidable, agent uses bound parameters: Prisma $queryRaw tagged template (not $queryRawUnsafe), Sequelize replacements array, SQLAlchemy text() with :name parameters.",
+      "relevant_when": "Agent writes raw SQL queries through an ORM escape hatch"
+    },
+    {
+      "name": "numeric-ids-validated-before-query",
+      "rule": "Agent parses and validates numeric IDs (parseInt with radix 10, then checks isNaN and id > 0) before using them in database queries. Returns HTTP 400 for invalid IDs.",
+      "relevant_when": "Agent uses URL parameters or user input as database query identifiers"
+    },
+    {
+      "name": "no-innerhtml-with-user-data",
+      "rule": "Agent never uses innerHTML to insert user-supplied data into the DOM. Uses textContent for text content and createElement+appendChild for structured content. Even escaped user data should use textContent, not innerHTML.",
+      "relevant_when": "Agent renders user-supplied data in the browser DOM"
+    },
+    {
+      "name": "no-dangerous-framework-apis",
+      "rule": "Agent never uses dangerouslySetInnerHTML (React), v-html (Vue), or [innerHTML] binding (Angular) with user-supplied data. Uses normal JSX expressions {value}, Vue {{ value }} interpolation, or Angular {{ value }} instead.",
+      "relevant_when": "Agent renders user-supplied data in React, Vue, or Angular components"
+    },
+    {
+      "name": "escape-html-complete",
+      "rule": "If an HTML escape function is provided, it must cover all five dangerous characters: & -> &amp;, < -> &lt;, > -> &gt;, \" -> &quot;, ' -> &#039; (or &#x27;). The ampersand replacement must come first.",
+      "relevant_when": "Agent creates an HTML escape/sanitization utility function"
+    }
+  ]
+}
