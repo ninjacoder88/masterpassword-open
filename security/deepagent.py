@@ -21,8 +21,10 @@ Configuration knobs (all optional — sensible defaults are auto-detected):
                           (default: auto-detect, falls back to "/").
     LANGUAGE              Force a specific language profile
                           (csharp|python|java|javascript|go).
-    ANALYSIS_WORKERS      Number of concurrent Phase-2 LLM calls (default 4).
-    ANALYSIS_CHUNK_FILES  Number of source files per Phase-2 chunk (default 6).
+    ANALYSIS_WORKERS      Number of concurrent Phase-2 LLM calls (default 8).
+    ANALYSIS_CHUNK_FILES  Number of source files per Phase-2 chunk (default 3).
+                          Smaller chunks finish faster and are more parallelisable;
+                          avoid values > 6 or Bedrock latency dominates.
     BEDROCK_MODEL_ID      Bedrock model ID. Default
                           ``qwen.qwen3-coder-30b-a3b-v1:0`` (matches the
                           original demo). For accounts/regions that require a
@@ -49,6 +51,7 @@ import boto3
 import git
 import requests
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
 from dotenv import load_dotenv
@@ -57,7 +60,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 
-load_dotenv(overrides=True)
+load_dotenv(override=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths
@@ -119,7 +122,14 @@ class LanguageProfile:
     manifest_files: tuple[str, ...]  # for SCA
     osv_ecosystem: str | None  # ecosystem name in OSV.dev
     project_markers: tuple[str, ...]  # files that mark an app root
-    high_value_filename_patterns: tuple[str, ...]  # regex for prioritised reads
+    high_value_filename_patterns: tuple[
+        str, ...
+    ]  # regex for prioritised reads (legacy)
+    handler_file_patterns: tuple[str, ...]  # regex for request-handler source files
+    handler_class_markers: tuple[
+        str, ...
+    ]  # content regex that confirms a handler class
+    auth_file_patterns: tuple[str, ...]  # regex for auth/config/crypto files
     ignore_dirs: tuple[str, ...]
     vulnerability_hints: str  # appended into Phase-2 prompt
 
@@ -174,6 +184,32 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
             r".*Configuration\.cs$",
             r"web\.config$",
         ),
+        # Request-handler files: ASP.NET controllers + MediatR request handlers
+        handler_file_patterns=(
+            r".*Controller\.cs$",
+            r".*RequestHandler\.cs$",
+        ),
+        # Content-level markers confirming the file contains a handler class
+        handler_class_markers=(
+            r"\[ApiController\]",
+            r":\s*Controller\b",
+            r":\s*ControllerBase\b",
+            r"IRequestHandler<",
+            r"\[Http(Get|Post|Put|Delete|Patch)\]",
+        ),
+        # Auth, session, crypto, middleware, config files
+        auth_file_patterns=(
+            r"Startup\.cs$",
+            r"Program\.cs$",
+            r"appsettings.*\.json$",
+            r"web\.config$",
+            r".*Authentication.*\.cs$",
+            r".*Authorization.*\.cs$",
+            r".*Middleware.*\.cs$",
+            r".*Encryptor\.cs$",
+            r".*KeyDeriver\.cs$",
+            r".*TokenGenerator\.cs$",
+        ),
         ignore_dirs=_COMMON_IGNORES,
         vulnerability_hints=(
             "- ASP.NET Core: missing [Authorize], disabled antiforgery, "
@@ -207,6 +243,25 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
             r"wsgi\.py$",
             r"asgi\.py$",
         ),
+        handler_file_patterns=(
+            r"views\.py$",
+            r".*views.*\.py$",
+            r".*endpoints.*\.py$",
+            r"urls\.py$",
+        ),
+        handler_class_markers=(
+            r"class\s+\w+(View|ViewSet|APIView)\b",
+            r"@app\.route\b",
+            r"@router\.(get|post|put|delete|patch)\b",
+            r"def\s+(get|post|put|delete|patch|dispatch)\s*\(",
+        ),
+        auth_file_patterns=(
+            r"settings\.py$",
+            r".*auth.*\.py$",
+            r".*middleware.*\.py$",
+            r".*permissions.*\.py$",
+            r".*serializers.*\.py$",
+        ),
         ignore_dirs=_COMMON_IGNORES + ("migrations",),
         vulnerability_hints=(
             "- Django: `DEBUG=True`, `ALLOWED_HOSTS=['*']`, `@csrf_exempt`, "
@@ -229,6 +284,26 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
             r".*Repository\.java$",
             r".*SecurityConfig.*\.java$",
             r".*Filter\.java$",
+            r"application(-.*)?\.(properties|ya?ml)$",
+            r"web\.xml$",
+        ),
+        handler_file_patterns=(
+            r".*Controller\.java$",
+            r".*Resource\.java$",
+            r".*Endpoint\.java$",
+            r".*Servlet\.java$",
+        ),
+        handler_class_markers=(
+            r"@RestController\b",
+            r"@Controller\b",
+            r"@RequestMapping\b",
+            r"@(Get|Post|Put|Delete|Patch)Mapping\b",
+        ),
+        auth_file_patterns=(
+            r".*SecurityConfig.*\.java$",
+            r".*AuthenticationProvider.*\.java$",
+            r".*Filter\.java$",
+            r".*Application\.java$",
             r"application(-.*)?\.(properties|ya?ml)$",
             r"web\.xml$",
         ),
@@ -257,6 +332,24 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
             r".*auth.*\.(js|ts)$",
             r"\.env(\..*)?$",
         ),
+        handler_file_patterns=(
+            r".*router.*\.(js|ts)$",
+            r".*routes.*\.(js|ts)$",
+            r".*controller.*\.(js|ts)$",
+            r".*handler.*\.(js|ts)$",
+        ),
+        handler_class_markers=(
+            r"router\.(get|post|put|delete|patch)\b",
+            r"app\.(get|post|put|delete|patch)\b",
+            r"export\s+(default\s+)?function\s+\w*[Hh]andler\b",
+        ),
+        auth_file_patterns=(
+            r"server\.(js|ts)$",
+            r"app\.(js|ts)$",
+            r".*auth.*\.(js|ts)$",
+            r".*middleware.*\.(js|ts)$",
+            r"\.env(\..*)?$",
+        ),
         ignore_dirs=_COMMON_IGNORES,
         vulnerability_hints=(
             "- Express: missing `helmet`, permissive CORS, `eval`, "
@@ -277,6 +370,21 @@ LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
             r".*server.*\.go$",
             r".*router.*\.go$",
             r".*auth.*\.go$",
+        ),
+        handler_file_patterns=(
+            r".*handler.*\.go$",
+            r".*router.*\.go$",
+            r".*server.*\.go$",
+        ),
+        handler_class_markers=(
+            r"func\s+\w*[Hh]andler\b",
+            r"http\.HandleFunc\b",
+            r"mux\.(Handle|HandleFunc)\b",
+        ),
+        auth_file_patterns=(
+            r"main\.go$",
+            r".*auth.*\.go$",
+            r".*middleware.*\.go$",
         ),
         ignore_dirs=_COMMON_IGNORES,
         vulnerability_hints=(
@@ -549,16 +657,184 @@ def cve_lookup(manifest_paths: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Static pre-scanner — runs in Python before Phase 1 to classify files
+# ─────────────────────────────────────────────────────────────────────────────
+def prescan_handlers(cfg: "RepoConfig") -> dict[str, list[str]]:
+    """
+    Walk the repository on disk and classify source files into:
+      - "handlers":  request-handler files (controllers, route handlers, MediatR)
+      - "auth":      auth / session / crypto / config files
+      - "other_hv":  remaining high-value files from the language profile
+
+    Returns virtual paths (relative to cfg.local_path, prefixed with '/')
+    ready for direct use in ``read_file`` calls inside the recon agent.
+
+    Confirmed handlers (those whose content matches ``handler_class_markers``)
+    are listed first so the agent reads the most relevant files early.
+    """
+    prof = cfg.profile
+
+    # Resolve the app directory on the real filesystem
+    app_dir = os.path.normpath(os.path.join(cfg.local_path, cfg.app_root.lstrip("/")))
+    if not os.path.isdir(app_dir):
+        app_dir = cfg.local_path
+
+    def _to_virtual(abs_path: str) -> str:
+        rel = os.path.relpath(abs_path, cfg.local_path)
+        return "/" + rel.replace(os.sep, "/")
+
+    def _quick_scan(abs_path: str, markers: tuple[str, ...]) -> bool:
+        """Read first 8 KB and return True if any marker regex matches."""
+        try:
+            with open(abs_path, encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(8192)
+            return any(re.search(m, head) for m in markers)
+        except OSError:
+            return False
+
+    handler_abs: list[str] = []
+    auth_abs: list[str] = []
+    other_hv_abs: list[str] = []
+    seen: set[str] = set()
+
+    for rel in _walk_files(app_dir, prof.ignore_dirs):
+        abs_path = os.path.normpath(os.path.join(app_dir, rel))
+        if abs_path in seen:
+            continue
+
+        # Priority 1 — request-handler files (by name)
+        if any(re.search(p, rel, re.IGNORECASE) for p in prof.handler_file_patterns):
+            seen.add(abs_path)
+            handler_abs.append(abs_path)
+            continue
+
+        # Priority 2 — auth / config / crypto files (by name)
+        if any(re.search(p, rel, re.IGNORECASE) for p in prof.auth_file_patterns):
+            seen.add(abs_path)
+            auth_abs.append(abs_path)
+            continue
+
+        # Priority 3 — other high-value files from the legacy profile list
+        if any(
+            re.search(p, rel, re.IGNORECASE) for p in prof.high_value_filename_patterns
+        ):
+            seen.add(abs_path)
+            other_hv_abs.append(abs_path)
+
+    # Reorder handlers: content-confirmed ones first so the agent reads them early
+    confirmed: list[str] = []
+    unconfirmed: list[str] = []
+    for p in handler_abs:
+        (
+            confirmed if _quick_scan(p, prof.handler_class_markers) else unconfirmed
+        ).append(p)
+    handler_abs = confirmed + unconfirmed
+
+    print(
+        f"[Prescan] {len(confirmed)} confirmed + {len(unconfirmed)} candidate "
+        f"handler file(s), {len(auth_abs)} auth/config file(s), "
+        f"{len(other_hv_abs)} other high-value file(s)"
+    )
+    return {
+        "handlers": [_to_virtual(p) for p in handler_abs],
+        "auth": [_to_virtual(p) for p in auth_abs],
+        "other_hv": [_to_virtual(p) for p in other_hv_abs],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Prompt builders (language-agnostic)
 # ─────────────────────────────────────────────────────────────────────────────
-def build_recon_prompt(cfg: RepoConfig) -> str:
+def build_recon_prompt(
+    cfg: "RepoConfig", prescan: dict[str, list[str]] | None = None
+) -> str:
     prof = cfg.profile
+    cve_arg = json.dumps({"ecosystem": prof.osv_ecosystem, "paths": cfg.manifest_paths})
+
+    # ── Focused prompt (prescan results available) ────────────────────────────
+    if prescan:
+        handlers = prescan.get("handlers", [])
+        auth = prescan.get("auth", [])
+        other_hv = prescan.get("other_hv", [])
+
+        def _fmt(paths: list[str], limit: int) -> str:
+            return "\n".join(f"   - `{p}`" for p in paths[:limit]) or "   (none)"
+
+        handler_list = _fmt(handlers, 30)
+        auth_list = _fmt(auth, 15)
+        other_list = _fmt(other_hv, 8)
+
+        return f"""You are a code reconnaissance agent performing the first step of a SAST pipeline.
+
+Your ONLY job is to map the application and collect raw material — do NOT label
+anything as vulnerable yet.
+
+### Target
+- Language profile: **{prof.name}**
+- App root (virtual): **{cfg.app_root}**
+
+### Permitted tools — you may ONLY call these two
+- `read_file` — read a file in full (NO offset/limit)
+- `cve_lookup` — call exactly ONCE for SCA
+
+### FORBIDDEN
+- `ls`, `glob`, `grep`, `write_file`, `edit_file`.
+- Reading any file not listed in the steps below.
+
+### Step 1 — Read ALL request handler files (highest priority)
+These files define routes/actions and are the primary attack surface.
+For each file, identify:
+  a) Every class that is a request handler (look for controller/handler class markers)
+  b) Each public action method: HTTP verb, route pattern, parameter bindings
+  c) Authorization attributes or guards on the class and each method
+  d) Any direct data access, crypto calls, subprocess, deserialization, or file I/O
+
+{handler_list}
+
+### Step 2 — Read security-adjacent files
+Authentication, session, cryptography, configuration, and middleware:
+
+{auth_list}
+
+### Step 3 — Other high-value files (read only if not already covered above)
+
+{other_list}
+
+### Step 4 — SCA scan (call exactly once, then STOP)
+Call `cve_lookup` with this exact JSON string:
+`{cve_arg}`
+
+### What to record in endpoints[]
+For every route found, emit one entry:
+  {{"route": "<verb> /path/to/route", "handler": "<ClassName.MethodName>", "requires_auth": true/false}}
+Set requires_auth=false if there is NO authentication attribute/guard on the method or its class.
+
+### Output Format — respond ONLY with JSON, no prose
+```json
+{{
+  "language": "{prof.name}",
+  "app_root": "{cfg.app_root}",
+  "app_structure": ["list of key file paths discovered"],
+  "config": {{
+    "<config-file-name>": "<key settings as JSON or excerpt>"
+  }},
+  "endpoints": [
+    {{"route": "<verb> /path", "handler": "<class.method>", "requires_auth": true}}
+  ],
+  "code_snippets": {{
+    "<relative/path.ext>": "<full file content>"
+  }},
+  "sca_findings": <raw output from cve_lookup, JSON array>
+}}
+```
+"""
+
+    # ── Fallback: broad-recon prompt (no prescan available) ───────────────────
     ext_glob = "{" + ",".join(e.lstrip(".") for e in prof.extensions) + "}"
     ignore_list = ", ".join(f"`{d}/`" for d in prof.ignore_dirs[:12])
     high_value = "\n".join(
         f"   - regex: `{p}`" for p in prof.high_value_filename_patterns
     )
-    cve_arg = json.dumps({"ecosystem": prof.osv_ecosystem, "paths": cfg.manifest_paths})
 
     return f"""You are a code reconnaissance agent performing the first step of a SAST pipeline.
 
@@ -592,8 +868,8 @@ anything as vulnerable yet.
 1. `ls(path='{cfg.app_root}')`
 2. `glob(pattern='**/*.{ext_glob}', path='{cfg.app_root}')`
 3. `read_file` on every file matching a high-value regex above (full content).
-4. Read 5-15 additional source files that look security-relevant
-   (controllers, auth, config, crypto, data access, deserialization).
+4. Focus on request handlers: for each controller/handler file read, identify every
+   class that handles HTTP requests, its authorization guards, and its action methods.
 5. `cve_lookup` exactly once with this exact JSON string argument:
    `{cve_arg}`
 6. Immediately emit the JSON code map below. Do NOT call any tool after `cve_lookup`.
@@ -608,7 +884,7 @@ anything as vulnerable yet.
     "<config-file-name>": "<key settings as JSON or excerpt>"
   }},
   "endpoints": [
-    {{"route": "<url/route>", "handler": "<class.method>", "requires_auth": true}}
+    {{"route": "<verb> /path", "handler": "<class.method>", "requires_auth": true}}
   ],
   "code_snippets": {{
     "<relative/path.ext>": "<full file content>"
@@ -826,58 +1102,83 @@ def run_phase(
 
 def _llm_call(system_prompt: str, task: str, label: str = "") -> str:
     """
-    Streaming LLM call with per-token progress dots.
+    Streaming LLM call with per-token progress dots and automatic retry.
 
-    Uses ``llm.stream()`` instead of ``llm.invoke()`` so tokens are returned
-    as they are generated — the model runs at the same speed, but the caller
-    gets a live heartbeat instead of an opaque silence.  A dot is printed
-    every 50 tokens; on completion the elapsed time and total token count are
-    shown.
+    Uses ``llm.stream()`` so tokens arrive incrementally — no silent hang.
+    Transient Bedrock errors (internalServerException, throttlingException,
+    serviceUnavailableException) are retried up to _LLM_MAX_RETRIES times
+    with exponential back-off.  Mid-stream failures reset the accumulator
+    so the retry starts clean.
 
-    Thread-safe: each print includes the chunk label so output from concurrent
-    workers is distinguishable even when lines interleave.
+    Thread-safe: every print is prefixed with the chunk label.
     """
     import time
 
+    # Transient Bedrock error codes that are safe to retry
+    _RETRYABLE = {
+        "internalServerException",
+        "throttlingException",
+        "serviceUnavailableException",
+        "ModelStreamErrorException",
+    }
+    _LLM_MAX_RETRIES = 3
+    _LLM_RETRY_BASE_DELAY = 5  # seconds; doubled each attempt (5 → 10 → 20)
+
     msgs = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
     prefix = f"  [{label}] " if label else "  "
-    token_count = 0
-    t0 = time.monotonic()
 
-    parts: list[str] = []
-    last_milestone = 0
+    for attempt in range(_LLM_MAX_RETRIES):
+        parts: list[str] = []
+        token_count = 0
+        last_milestone = 0
+        t0 = time.monotonic()
 
-    print(f"{prefix}streaming", end="", flush=True)
-    for chunk in llm.stream(msgs):
-        # ChatBedrockConverse yields content as either a plain str or a list of
-        # content-block dicts: [{"type": "text", "text": "..."}].  Handle both.
-        raw = chunk.content if hasattr(chunk, "content") else ""
-        if isinstance(raw, list):
-            text = "".join(
-                block.get("text", "") if isinstance(block, dict) else str(block)
-                for block in raw
-            )
-        elif isinstance(raw, str):
-            text = raw
-        else:
-            text = str(raw)
+        try:
+            print(f"{prefix}streaming", end="", flush=True)
+            for chunk in llm.stream(msgs):
+                # ChatBedrockConverse yields content as either a plain str or a list of
+                # content-block dicts: [{"type": "text", "text": "..."}].  Handle both.
+                raw = chunk.content if hasattr(chunk, "content") else ""
+                if isinstance(raw, list):
+                    text = "".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in raw
+                    )
+                elif isinstance(raw, str):
+                    text = raw
+                else:
+                    text = str(raw)
 
-        if text:
-            parts.append(text)
-            token_count += len(text.split())
-            # Heartbeat every ~50 approximate tokens
-            if token_count - last_milestone >= 50:
-                last_milestone = token_count
-                elapsed = time.monotonic() - t0
+                if text:
+                    parts.append(text)
+                    token_count += len(text.split())
+                    # Heartbeat every ~50 approximate tokens
+                    if token_count - last_milestone >= 50:
+                        last_milestone = token_count
+                        elapsed = time.monotonic() - t0
+                        print(
+                            f"\n{prefix}  ~{token_count} tokens ({elapsed:.0f}s)",
+                            end="",
+                            flush=True,
+                        )
+
+            elapsed = time.monotonic() - t0
+            print(f"\n{prefix}done (~{token_count} tokens, {elapsed:.1f}s)", flush=True)
+            return "".join(parts)
+
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in _RETRYABLE and attempt < _LLM_MAX_RETRIES - 1:
+                delay = _LLM_RETRY_BASE_DELAY * (2**attempt)
                 print(
-                    f"\n{prefix}  ~{token_count} tokens ({elapsed:.0f}s)",
-                    end="",
+                    f"\n{prefix}transient error ({code}), retrying in {delay}s "
+                    f"(attempt {attempt + 1}/{_LLM_MAX_RETRIES})",
                     flush=True,
                 )
-
-    elapsed = time.monotonic() - t0
-    print(f"\n{prefix}done (~{token_count} tokens, {elapsed:.1f}s)", flush=True)
-    return "".join(parts)
+                time.sleep(delay)
+                continue
+            # Non-retryable or final attempt — re-raise so _run_one logs it
+            raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1019,8 +1320,11 @@ def run_pipeline(
     cfg = build_repo_config(local_path, repo_url, app_root, language)
     backend = _make_backend(cfg)
 
+    # ── Pre-scan: classify files without LLM ────────────────────────────────
+    prescan = prescan_handlers(cfg)
+
     # ── Phase 1: Recon ───────────────────────────────────────────────────────
-    recon_prompt = build_recon_prompt(cfg)
+    recon_prompt = build_recon_prompt(cfg, prescan=prescan)
     recon_task = (
         f"Perform reconnaissance on the {cfg.language} app rooted at "
         f"`{cfg.app_root}`. Follow your system prompt exactly and emit a JSON "
@@ -1042,8 +1346,8 @@ def run_pipeline(
         return
 
     # ── Phase 2: Concurrent Analysis ─────────────────────────────────────────
-    workers = int(os.environ.get("ANALYSIS_WORKERS", "4"))
-    chunk_files = int(os.environ.get("ANALYSIS_CHUNK_FILES", "6"))
+    workers = int(os.environ.get("ANALYSIS_WORKERS", "8"))
+    chunk_files = int(os.environ.get("ANALYSIS_CHUNK_FILES", "3"))
     candidate_findings = run_analysis_concurrent(
         code_map, cfg.language, workers=workers, chunk_files=chunk_files
     )
