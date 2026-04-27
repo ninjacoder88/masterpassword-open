@@ -65,6 +65,45 @@ from langchain_core.tools import tool
 
 load_dotenv(override=True)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tee stream — writes to both a file and the real terminal simultaneously
+# ─────────────────────────────────────────────────────────────────────────────
+class _TeeStream:
+    """Mirror every write to *file_stream* and *term_stream* at the same time."""
+
+    def __init__(self, file_stream, term_stream):
+        self._file = file_stream
+        self._term = term_stream
+
+    def write(self, data: str) -> int:
+        self._file.write(data)
+        self._term.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._file.flush()
+        self._term.flush()
+
+    def close(self) -> None:
+        """Flush and close the *file* stream only; leave the terminal open."""
+        self._file.flush()
+        self._file.close()
+
+    # Expose enough of the file-object interface that code which calls
+    # ``sys.stdout.fileno()`` (e.g. subprocess) still works.
+    def fileno(self) -> int:
+        return self._term.fileno()
+
+    @property
+    def encoding(self) -> str:
+        return self._term.encoding
+
+    @property
+    def errors(self):
+        return self._term.errors
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,22 +548,41 @@ def build_repo_config(
         raise FileNotFoundError(f"Repo path does not exist: {local_path}")
 
     if not language:
-        language = detect_language(local_path)
+        # If APP_ROOT is already known, scope language detection to that subtree
+        # so that files outside the application (e.g. tooling, docs) don't
+        # skew the result.
+        _lang_scan = (
+            os.path.normpath(os.path.join(local_path, app_root.lstrip("/")))
+            if app_root
+            else local_path
+        )
+        language = detect_language(_lang_scan)
     profile = LANGUAGE_PROFILES[language]
 
     if not app_root:
         app_root = detect_app_root(local_path, profile)
+
+    # Resolve the virtual app_root to a real filesystem directory.
+    # Every file-walk that follows (manifests, prescan, …) is scoped here so
+    # that setting APP_ROOT=/src truly limits the scan to that subtree.
+    scan_root = os.path.normpath(os.path.join(local_path, app_root.lstrip("/")))
+    if not os.path.isdir(scan_root):
+        raise FileNotFoundError(
+            f"APP_ROOT '{app_root}' does not exist under {local_path} "
+            f"(resolved: {scan_root})"
+        )
 
     cfg = RepoConfig(
         local_path=local_path,
         app_root=app_root,
         language=language,
     )
-    cfg.manifest_paths = find_manifests(local_path, profile)
+    cfg.manifest_paths = find_manifests(scan_root, profile)
 
     print(f"Repo:      {cfg.local_path}")
     print(f"Language:  {cfg.language}")
     print(f"App root:  {cfg.app_root}")
+    print(f"Scan root: {scan_root}")
     print(f"Manifests: {len(cfg.manifest_paths)} found")
     return cfg
 
@@ -532,6 +590,45 @@ def build_repo_config(
 # ─────────────────────────────────────────────────────────────────────────────
 # SCA tool — multi-ecosystem
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Mapping from manifest filename / extension to OSV ecosystem name
+_ECOSYSTEM_BY_FILE: dict[str, str] = {
+    # NuGet
+    "packages.config": "NuGet",
+    # PyPI
+    "requirements.txt": "PyPI",
+    "pipfile": "PyPI",
+    "setup.cfg": "PyPI",
+    "pyproject.toml": "PyPI",
+    # npm
+    "package.json": "npm",
+    # Maven
+    "pom.xml": "Maven",
+    "build.gradle": "Maven",
+    "build.gradle.kts": "Maven",
+    # Go
+    "go.mod": "Go",
+    "go.sum": "Go",
+}
+_ECOSYSTEM_BY_EXT: dict[str, str] = {
+    ".csproj": "NuGet",
+    ".fsproj": "NuGet",
+    ".vbproj": "NuGet",
+}
+
+
+def _detect_ecosystem(paths: list[str]) -> str | None:
+    """Infer the OSV ecosystem from a list of manifest file paths."""
+    for p in paths:
+        base = os.path.basename(p).lower()
+        _, ext = os.path.splitext(base)
+        if base in _ECOSYSTEM_BY_FILE:
+            return _ECOSYSTEM_BY_FILE[base]
+        if ext in _ECOSYSTEM_BY_EXT:
+            return _ECOSYSTEM_BY_EXT[ext]
+    return None
+
+
 def _parse_manifest(path: str, ecosystem: str) -> list[tuple[str, str | None]]:
     """Return [(package, version or None), ...] for a single manifest file."""
     try:
@@ -607,8 +704,22 @@ def cve_lookup(manifest_paths: str) -> str:
     """
     try:
         payload = json.loads(manifest_paths)
-        ecosystem = payload["ecosystem"]
-        paths = payload["paths"]
+        if isinstance(payload, list):
+            # LLM passed a bare list of paths — auto-detect ecosystem
+            paths = [str(p) for p in payload]
+            ecosystem = _detect_ecosystem(paths)
+            if not ecosystem:
+                return json.dumps(
+                    {
+                        "error": (
+                            "Could not detect ecosystem from paths. "
+                            'Pass {"ecosystem":"NuGet","paths":[...]} instead.'
+                        )
+                    }
+                )
+        else:
+            ecosystem = payload["ecosystem"]
+            paths = payload["paths"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         return json.dumps({"error": f"Invalid input: {e}"})
 
@@ -642,15 +753,12 @@ def cve_lookup(manifest_paths: str) -> str:
                     "version": version,
                     "id": v.get("id"),
                     "summary": v.get("summary", ""),
-                    "severity": (
-                        v.get("database_specific", {}).get("severity")
-                        or (
-                            v.get("severity", [{}])[0].get("score")
-                            if v.get("severity")
-                            else "UNKNOWN"
-                        )
+                    "severity": v.get("database_specific", {}).get(
+                        "severity", "UNKNOWN"
                     ),
-                    "references": [r.get("url") for r in v.get("references", [])[:3]],
+                    "references": [
+                        ref.get("url") for ref in v.get("references", [])[:3]
+                    ],
                 }
             )
 
@@ -749,10 +857,23 @@ def prescan_handlers(cfg: "RepoConfig") -> dict[str, list[str]]:
 # Prompt builders (language-agnostic)
 # ─────────────────────────────────────────────────────────────────────────────
 def build_recon_prompt(
-    cfg: "RepoConfig", prescan: dict[str, list[str]] | None = None
+    cfg: "RepoConfig",
+    prescan: dict[str, list[str]] | None = None,
+    threat_context: str = "",
 ) -> str:
     prof = cfg.profile
     cve_arg = json.dumps({"ecosystem": prof.osv_ecosystem, "paths": cfg.manifest_paths})
+
+    _threat_section = (
+        (
+            "\n### Prior Threat Analysis (use to guide your focus)\n"
+            "The following threat model has already identified attack surfaces and risks.\n"
+            "Use it to prioritize which files and components you examine.\n\n"
+            "<threat_model>\n" + threat_context[:6000] + "\n</threat_model>\n"
+        )
+        if threat_context.strip()
+        else ""
+    )
 
     # ── Focused prompt (prescan results available) ────────────────────────────
     if prescan:
@@ -775,7 +896,7 @@ anything as vulnerable yet.
 ### Target
 - Language profile: **{prof.name}**
 - App root (virtual): **{cfg.app_root}**
-
+{_threat_section}
 ### Permitted tools — you may ONLY call these two
 - `read_file` — read a file in full (NO offset/limit)
 - `cve_lookup` — call exactly ONCE for SCA
@@ -848,7 +969,7 @@ anything as vulnerable yet.
 - Language profile: **{prof.name}**
 - App root (virtual): **{cfg.app_root}**
 - Source extensions: {", ".join(prof.extensions)}
-
+{_threat_section}
 ### Permitted tools — you may ONLY call these four
 - `ls` — list a directory
 - `glob` — find files by pattern
@@ -1216,6 +1337,7 @@ def run_analysis_concurrent(
     language: str,
     workers: int,
     chunk_files: int,
+    threat_context: str = "",
 ) -> list[dict]:
     """
     Split `code_map["code_snippets"]` into chunks of `chunk_files` files each
@@ -1246,12 +1368,20 @@ def run_analysis_concurrent(
             "sca_findings": sca if idx == sca_chunk_index else [],
             "_chunk_info": f"chunk {idx + 1} of {len(chunks)}",
         }
-        return (
+        task = (
             "Below is a SUBSET of the recon code map. Analyse only these files "
             "(plus the shared config / SCA findings) and return the JSON "
             "candidate findings array.\n\n--- CODE MAP CHUNK ---\n"
             + json.dumps(partial_map, indent=2)
         )
+        if threat_context:
+            task += (
+                "\n\n--- PRIOR THREAT ANALYSIS (context only) ---\n"
+                "The following threat model was produced before this SAST run. "
+                "Use it to prioritize finding vulnerabilities that align with the "
+                "identified attack surfaces and threats.\n\n" + threat_context[:3000]
+            )
+        return task
 
     def _run_one(idx: int, chunk: dict[str, str]) -> list[dict]:
         label = f"chunk {idx + 1}/{len(chunks)}"
@@ -1315,15 +1445,19 @@ def run_pipeline(
     repo_url: str | None = None,
     app_root: str | None = None,
     language: str | None = None,
+    threat_model_path: str | None = None,
 ) -> None:
     # Handle output redirection
-    output_file = "/home/t/code/masterpassword-open/log.txt"
+    _log_dir = os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_file = os.path.join(_log_dir, f"run_{_log_ts}.txt")
     original_stdout = None
     if output_file:
         try:
             output_fh = open(output_file, "w", encoding="utf-8")
             original_stdout = sys.stdout
-            sys.stdout = output_fh
+            sys.stdout = _TeeStream(output_fh, original_stdout)
         except OSError as e:
             print(f"Warning: Could not open output file '{output_file}': {e}")
             output_file = None
@@ -1337,11 +1471,24 @@ def run_pipeline(
         cfg = build_repo_config(local_path, repo_url, app_root, language)
         backend = _make_backend(cfg)
 
+        # ── Threat model context (optional) ──────────────────────────────────────
+        _tm_path = threat_model_path or os.environ.get("THREAT_MODEL_PATH")
+        threat_context = ""
+        if _tm_path:
+            try:
+                with open(_tm_path, encoding="utf-8") as fh:
+                    threat_context = fh.read()
+                print(f"[Threat Model] Loaded context from: {_tm_path}")
+            except OSError as e:
+                print(f"[Threat Model] Warning: could not load '{_tm_path}': {e}")
+
         # ── Pre-scan: classify files without LLM ────────────────────────────────
         prescan = prescan_handlers(cfg)
 
         # ── Phase 1: Recon ───────────────────────────────────────────────────────
-        recon_prompt = build_recon_prompt(cfg, prescan=prescan)
+        recon_prompt = build_recon_prompt(
+            cfg, prescan=prescan, threat_context=threat_context
+        )
         recon_task = (
             f"Perform reconnaissance on the {cfg.language} app rooted at "
             f"`{cfg.app_root}`. Follow your system prompt exactly and emit a JSON "
@@ -1366,7 +1513,11 @@ def run_pipeline(
         workers = int(os.environ.get("ANALYSIS_WORKERS", "8"))
         chunk_files = int(os.environ.get("ANALYSIS_CHUNK_FILES", "3"))
         candidate_findings = run_analysis_concurrent(
-            code_map, cfg.language, workers=workers, chunk_files=chunk_files
+            code_map,
+            cfg.language,
+            workers=workers,
+            chunk_files=chunk_files,
+            threat_context=threat_context,
         )
 
         # ── Phase 3: Triage & Report ─────────────────────────────────────────────
@@ -1375,6 +1526,13 @@ def run_pipeline(
             "analysis workers. Triage them and produce the final security report.\n\n"
             "--- CANDIDATE FINDINGS ---\n" + json.dumps(candidate_findings, indent=2)
         )
+        if threat_context:
+            report_task += (
+                "\n\n--- PRIOR THREAT ANALYSIS (context only) ---\n"
+                "The following threat model was produced before this SAST run. "
+                "Use it to ensure the final report addresses the identified threats "
+                "and attack surfaces.\n\n" + threat_context[:6000]
+            )
         report_result = run_phase(
             "Phase 3 — Report",
             REPORT_PROMPT_TEMPLATE,

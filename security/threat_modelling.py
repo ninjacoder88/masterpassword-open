@@ -536,22 +536,29 @@ def _parse_args() -> argparse.Namespace:
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
-def main() -> None:
-    args = _parse_args()
-    source_dir = os.path.abspath(args.source_dir)
+def run_threat_model(
+    source_dir: str | None = None,
+    language: str | None = None,
+    faiss_path: str | None = None,
+    rebuild: bool = False,
+) -> str:
+    """Run the STRIDE+OWASP threat model pipeline and return the output file path."""
+    if source_dir is None:
+        source_dir = os.environ.get("SOURCE_DIR", os.path.join(WORKSPACE_ROOT, "src"))
+    source_dir = os.path.abspath(source_dir)
 
     if not os.path.isdir(source_dir):
         print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
         sys.exit(1)
 
     # ── Language detection ────────────────────────────────────────────────
-    language = args.language or detect_language(source_dir)
+    language = language or os.environ.get("LANGUAGE") or detect_language(source_dir)
     profile = LANGUAGE_PROFILES[language]
     print(f"Language profile : {language}")
 
     # ── FAISS path ────────────────────────────────────────────────────────
-    if args.faiss_path:
-        faiss_path = os.path.abspath(args.faiss_path)
+    if faiss_path:
+        faiss_path = os.path.abspath(faiss_path)
     else:
         # Derive a stable name from the source directory basename.
         dir_name = os.path.basename(source_dir.rstrip(os.sep)) or "repo"
@@ -563,7 +570,7 @@ def main() -> None:
         if (
             dir_name == "src"
             and os.path.isfile(os.path.join(default_index, "index.faiss"))
-            and not args.rebuild
+            and not rebuild
         ):
             faiss_path = default_index
             print(f"Reusing existing FAISS index : {faiss_path}")
@@ -592,7 +599,7 @@ def main() -> None:
         extensions=tuple(profile["extensions"]),
         embeddings=embeddings,
         index_path=faiss_path,
-        rebuild=args.rebuild,
+        rebuild=rebuild,
     )
     retriever = db.as_retriever(
         search_type="mmr",
@@ -641,6 +648,18 @@ def main() -> None:
     print(f"\n\n{sep}")
     print(f"Threat model saved to: {output_path}")
     print(sep)
+
+    return output_path
+
+
+def main() -> None:
+    args = _parse_args()
+    run_threat_model(
+        source_dir=args.source_dir,
+        language=args.language,
+        faiss_path=args.faiss_path,
+        rebuild=args.rebuild,
+    )
 
 
 if __name__ == "__main__":
