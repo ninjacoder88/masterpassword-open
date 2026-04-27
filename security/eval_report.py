@@ -7,7 +7,7 @@ REPORT_PROMPT. It does not run the SAST agent; it scores an existing report.
 
 Usage:
     uv run python security/eval_report.py --report security/findings/sast_run.json
-    uv run python security/eval_report.py --report report.json --ground-truth security/findings/GROUND_TRUTH.json --output eval.json
+    uv run python security/eval_report.py --report report.json --ground-truth security/findings/GROUND_TRUTH.json
 """
 
 from __future__ import annotations
@@ -150,6 +150,16 @@ def load_json_file(path: Path) -> Any:
 def write_json_file(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + os.linesep, encoding="utf-8")
+
+
+def default_eval_output_path(report_path: str | Path) -> Path:
+    path = Path(report_path)
+    stem = path.stem
+    if stem.startswith("sast_"):
+        output_stem = "eval_" + stem.removeprefix("sast_")
+    else:
+        output_stem = stem + "_eval"
+    return path.with_name(output_stem + ".json")
 
 
 def validate_report(report: Any) -> LocalValidation:
@@ -709,8 +719,9 @@ async def evaluate_report_request_async(request: ReportEvaluationRequest) -> dic
         scores["recall_score"] = ground_truth_coverage["recall"]
         scores["precision_score"] = ground_truth_coverage["precision"]
 
-    if request.output_path:
-        write_json_file(Path(request.output_path), evaluation)
+    output_path = Path(request.output_path) if request.output_path else default_eval_output_path(report_path)
+    evaluation["metadata"]["output_path"] = str(output_path)
+    write_json_file(output_path, evaluation)
 
     return evaluation
 
@@ -766,7 +777,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         default=None,
-        help="Optional path to write evaluation JSON.",
+        help="Optional path to write evaluation JSON. Defaults to eval_<report timestamp>.json beside the report.",
     )
     return parser
 
@@ -796,8 +807,9 @@ async def async_main() -> int:
     rendered = json.dumps(evaluation, indent=2)
     print(rendered)
 
-    if args.output:
-        print(f"\nEvaluation saved: {Path(args.output)}")
+    output_path = evaluation.get("metadata", {}).get("output_path")
+    if output_path:
+        print(f"\nEvaluation saved: {output_path}")
 
     return 0
 
