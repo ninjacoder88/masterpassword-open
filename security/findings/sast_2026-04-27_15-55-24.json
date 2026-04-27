@@ -1,0 +1,115 @@
+{
+  "summary": {
+    "total_findings": 8,
+    "critical": 3,
+    "high": 3,
+    "medium": 2,
+    "low": 0
+  },
+  "findings": [
+    {
+      "id": "FINDING-001",
+      "title": "Use of Predictable Pseudo-Random Number Generator for Token Generation",
+      "severity": "Critical",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-330",
+      "file": "/src/MasterPassword.BusinessLogic/TokenGenerator.cs",
+      "line": 21,
+      "description": "Use of 'System.Random' for generating tokens is insecure because it's a pseudo-random number generator and predictable. This makes tokens vulnerable to prediction attacks, potentially allowing attackers to forge valid tokens and gain unauthorized access.",
+      "evidence": "Random random = new Random();",
+      "attack_scenario": "An attacker who observes multiple generated tokens can reverse-engineer the internal state of the PRNG and predict future tokens. With predicted tokens, the attacker can impersonate any user and gain full access to their vault data, including encrypted notes and passwords.",
+      "remediation": "Replace 'System.Random' with 'System.Security.Cryptography.RandomNumberGenerator' or 'System.Security.Cryptography.RNGCryptoServiceProvider' for cryptographically secure random number generation."
+    },
+    {
+      "id": "FINDING-002",
+      "title": "Use of Predictable Pseudo-Random Number Generator for Password Generation",
+      "severity": "Critical",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-330",
+      "file": "/src/MasterPassword.BusinessLogic/RequestHandlers/GeneratePassword/GeneratePasswordRequestHandler.cs",
+      "line": 16,
+      "description": "Use of 'System.Random' for generating passwords is insecure because it's a pseudo-random number generator and predictable. This can lead to weak passwords that are easier to guess or brute-force, compromising the security of generated passwords.",
+      "evidence": "Random random = new Random();",
+      "attack_scenario": "An attacker who observes multiple generated passwords can reverse-engineer the internal state of the PRNG and predict future passwords. This allows the attacker to compromise user accounts by guessing weak passwords, potentially gaining access to encrypted vault data.",
+      "remediation": "Replace 'System.Random' with 'System.Security.Cryptography.RandomNumberGenerator' or 'System.Security.Cryptography.RNGCryptoServiceProvider' for cryptographically secure random number generation."
+    },
+    {
+      "id": "FINDING-003",
+      "title": "Missing Authorization Policy Enforcement on Authentication Scheme",
+      "severity": "Critical",
+      "owasp_category": "A01 - Broken Access Control",
+      "cwe": "CWE-285",
+      "file": "/src/MasterPassword/Startup.cs",
+      "line": 67,
+      "description": "The authentication scheme does not enforce authorization policies for protected routes. Without explicit [Authorize] attributes on controllers/actions, any authenticated user may access all endpoints, leading to potential privilege escalation.",
+      "evidence": "services.AddAuthentication(\"Custom\").AddScheme<MasterPasswordAuthOptions, MasterPasswordAuthenticationHandler>(\"Custom\", null);",
+      "attack_scenario": "An attacker who gains valid authentication credentials can access all application endpoints without restriction. This allows them to view, modify, or delete any user's vault data, notes, or account information, effectively bypassing all access controls.",
+      "remediation": "Implement proper authorization policies by adding [Authorize] attributes to controllers/actions that require authentication, or configure authorization middleware to enforce role-based or policy-based access control."
+    },
+    {
+      "id": "FINDING-004",
+      "title": "Insecure Key Derivation Using Base64 Encoding and Truncation",
+      "severity": "High",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-326",
+      "file": "/src/MasterPassword.BusinessLogic/KeyDeriver.cs",
+      "line": 13,
+      "description": "Insecure key derivation using Base64 encoding and truncation instead of a proper key derivation function (KDF) like PBKDF2 or Argon2. This approach does not provide sufficient entropy or resistance to brute-force attacks, making derived keys weak and vulnerable to cryptanalysis.",
+      "evidence": "string encodedPassword = Convert.ToBase64String(Encoding.UTF8.GetBytes(password));\nreturn encodedPassword.Length > 32 ? encodedPassword.Substring(0, 32) : encodedPassword.PadLeft(32);",
+      "attack_scenario": "An attacker who obtains a user's master password can easily brute-force or perform rainbow table attacks against the derived key. This compromises the encryption of all vault data, allowing unauthorized access to encrypted notes and passwords.",
+      "remediation": "Replace the Base64 encoding approach with a proper key derivation function such as PBKDF2, bcrypt, or Argon2 with appropriate iterations and salt values."
+    },
+    {
+      "id": "FINDING-005",
+      "title": "Wildcard Host Configuration Allows Cross-Site Scripting Attacks",
+      "severity": "High",
+      "owasp_category": "A05 - Security Misconfiguration",
+      "cwe": "CWE-942",
+      "file": "/src/MasterPassword/appsettings.json",
+      "line": 9,
+      "description": "Wildcard host configuration ('*') allows requests from any domain, exposing the application to Cross-Origin Resource Sharing (CORS) and potential cross-site scripting (XSS) attacks. It should be restricted to known domains.",
+      "evidence": "\"AllowedHosts\": \"*\"",
+      "attack_scenario": "An attacker can host malicious content on any domain and make requests to the application using the victim's browser. This can lead to XSS attacks, session hijacking, or data exfiltration through CORS misconfigurations.",
+      "remediation": "Restrict the 'AllowedHosts' configuration to known, trusted domains instead of using wildcard '*' value."
+    },
+    {
+      "id": "FINDING-006",
+      "title": "Outdated MongoDB Driver with Remote Code Execution Vulnerability",
+      "severity": "Critical",
+      "owasp_category": "A06 - Vulnerable & Outdated Components",
+      "cwe": "CWE-502",
+      "file": "/src/MasterPassword.DataAccess.MongoDbAtlas/MasterPassword.DataAccess.MongoDbAtlas.csproj",
+      "line": 11,
+      "description": "The MongoDB driver version 2.18.0 has a known high-severity vulnerability related to Deserialization of Untrusted Data (CVE-2022-48282). This could allow remote code execution if untrusted data is processed through the driver.",
+      "evidence": "<PackageReference Include=\"MongoDB.Driver\" Version=\"2.18.0\" />",
+      "attack_scenario": "An attacker who can inject untrusted data into the application can exploit CVE-2022-48282 to execute arbitrary code on the server. This could lead to complete system compromise, data theft, or further lateral movement within the network.",
+      "remediation": "Upgrade the MongoDB.Driver package to version 2.20.0 or higher to address CVE-2022-48282 and remove the remote code execution vulnerability."
+    },
+    {
+      "id": "FINDING-007",
+      "title": "Missing Secure Flag on Session Cookie",
+      "severity": "High",
+      "owasp_category": "A05 - Security Misconfiguration",
+      "cwe": "CWE-614",
+      "file": "/src/MasterPassword/Startup.cs",
+      "line": 25,
+      "description": "The session cookie is missing the 'Secure' flag, which could allow session hijacking over unencrypted HTTP connections. While HttpOnly and IsEssential are set, the absence of Secure flag makes the session vulnerable in non-development environments.",
+      "evidence": "options.Cookie.HttpOnly = true;\noptions.Cookie.IsEssential = true;",
+      "attack_scenario": "An attacker who intercepts traffic over unencrypted HTTP connections can steal session cookies and impersonate authenticated users. This allows unauthorized access to user vault data and account functionality.",
+      "remediation": "Add 'options.Cookie.Secure = true;' to the session configuration to ensure cookies are only sent over HTTPS connections."
+    },
+    {
+      "id": "FINDING-008",
+      "title": "Weak PBKDF2 Iteration Count for Password Hashing",
+      "severity": "Medium",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-916",
+      "file": "/src/MasterPassword.BusinessLogic/Encryptor.cs",
+      "line": 20,
+      "description": "While PBKDF2 is used, the iteration count of 10000 is relatively low and may not provide sufficient resistance against brute-force attacks. Modern standards recommend at least 100,000 iterations for strong password hashing.",
+      "evidence": "private const int Iterations = 10000;",
+      "attack_scenario": "An attacker with access to hashed passwords can perform faster brute-force attacks compared to recommended standards. This increases the likelihood of successfully cracking user passwords and accessing their vault data.",
+      "remediation": "Increase the PBKDF2 iteration count to at least 100,000 or higher based on performance requirements and security considerations."
+    }
+  ]
+}

@@ -1,0 +1,276 @@
+{
+  "scores": {
+    "summary_score": 0.3,
+    "finding_validity_score": 0.55,
+    "severity_score": 0.45,
+    "taxonomy_score": 0.75,
+    "evidence_score": 0.7,
+    "attack_scenario_score": 0.65,
+    "remediation_score": 0.7,
+    "precision_score": 0.375,
+    "recall_score": 0.429,
+    "overall_score": 0.54
+  },
+  "verdict": "needs_review",
+  "finding_reviews": [
+    {
+      "id": "FINDING-001",
+      "valid": true,
+      "severity_correct": false,
+      "recommended_severity": "High",
+      "issues": [
+        "CWE-330 is correct but CWE-338 (Inadequate Encryption Strength) is more precise for PRNG in token generation",
+        "Severity overstated as Critical; should be High since tokens are bearer tokens but not the master encryption key"
+      ],
+      "feedback": "Finding is valid and well-supported. Evidence is exact. Attack scenario is concrete. However, severity should be High not Critical\u2014predictable tokens are serious but not as critical as master key compromise. CWE-338 is more specific than CWE-330."
+    },
+    {
+      "id": "FINDING-002",
+      "valid": true,
+      "severity_correct": false,
+      "recommended_severity": "High",
+      "issues": [
+        "Severity overstated as Critical; should be High",
+        "CWE-338 is more appropriate than CWE-330"
+      ],
+      "feedback": "Valid finding with good evidence and realistic attack scenario. However, generated passwords are user-facing outputs, not system secrets\u2014severity should be High not Critical. The impact is real but less severe than cryptographic key material compromise."
+    },
+    {
+      "id": "FINDING-003",
+      "valid": false,
+      "severity_correct": false,
+      "recommended_severity": "None",
+      "issues": [
+        "Evidence does not support the claim: the snippet shows UseAuthentication() and UseAuthorization() are both called",
+        "The finding conflates authentication setup with authorization enforcement; the code shows both middleware are registered",
+        "No evidence that [Authorize] attributes are missing from controllers\u2014this requires controller inspection, not Startup.cs inspection",
+        "Misinterprets the configuration as a vulnerability when the middleware chain appears correct"
+      ],
+      "feedback": "This is a false positive. The evidence shows app.UseAuthentication() and app.UseAuthorization() are both present in the middleware pipeline. The finding incorrectly claims authorization is not enforced based on Startup.cs configuration alone. Authorization enforcement depends on controller/action attributes, which are not shown in the evidence. This finding should be removed or requires evidence from actual controller code."
+    },
+    {
+      "id": "FINDING-004",
+      "valid": true,
+      "severity_correct": true,
+      "recommended_severity": "High",
+      "issues": [
+        "CWE-326 (Inadequate Encryption Strength) is reasonable but CWE-916 (Use of Password Hash With Insufficient Computational Effort) is more precise for KDF weakness"
+      ],
+      "feedback": "Valid and critical finding. Evidence is exact and shows the insecure Base64 truncation approach. Attack scenario is concrete and realistic. Remediation is specific. Severity is appropriate. Minor: CWE-916 would be more precise than CWE-326 for KDF issues."
+    },
+    {
+      "id": "FINDING-005",
+      "valid": false,
+      "severity_correct": false,
+      "recommended_severity": "None",
+      "issues": [
+        "AllowedHosts: '*' is a host header validation setting, not a CORS configuration",
+        "This does not directly enable XSS attacks; it validates which Host headers are accepted",
+        "The finding conflates host header validation with CORS and XSS, which are separate concerns",
+        "While wildcard hosts is not ideal, the severity and attack scenario are overstated"
+      ],
+      "feedback": "Partially valid but mischaracterized. AllowedHosts is for host header validation, not CORS policy. The finding incorrectly links this to XSS and CORS attacks. While using '*' is not a best practice, the attack scenario described (malicious domain making requests) is not directly enabled by this setting alone. Severity should be Low or Medium, not High. This finding needs significant revision or removal."
+    },
+    {
+      "id": "FINDING-006",
+      "valid": true,
+      "severity_correct": true,
+      "recommended_severity": "Critical",
+      "issues": [
+        "CVE-2022-48282 reference is accurate for MongoDB.Driver 2.18.0",
+        "Severity is appropriate given RCE potential"
+      ],
+      "feedback": "Valid and well-supported finding. Evidence shows outdated package version. CVE reference is accurate. Attack scenario is realistic. Remediation is specific and actionable. This is a legitimate critical vulnerability."
+    },
+    {
+      "id": "FINDING-007",
+      "valid": true,
+      "severity_correct": true,
+      "recommended_severity": "High",
+      "issues": [
+        "Evidence correctly shows HttpOnly and IsEssential are set but Secure flag is missing",
+        "CWE-614 is appropriate"
+      ],
+      "feedback": "Valid finding. Evidence is exact. The missing Secure flag is a real vulnerability in production environments. Attack scenario is concrete. Remediation is specific. Severity is appropriate for session hijacking risk."
+    },
+    {
+      "id": "FINDING-008",
+      "valid": true,
+      "severity_correct": false,
+      "recommended_severity": "Medium",
+      "issues": [
+        "CWE-916 is correct but the iteration count of 10,000 is actually within acceptable range for PBKDF2 (NIST recommends minimum 10,000 as of 2017, though 100,000+ is preferred)",
+        "Severity is appropriate as Medium, but the claim that 10,000 is 'relatively low' is debatable\u2014it meets minimum standards but is not optimal"
+      ],
+      "feedback": "Valid finding with correct severity. Evidence is exact. The iteration count of 10,000 meets minimum NIST standards but is below modern best practices (100,000+). Remediation is sound. Minor: the characterization of 10,000 as 'relatively low' is somewhat subjective, though the recommendation to increase is valid."
+    }
+  ],
+  "found_findings": [
+    "FINDING-001 found as FINDING-001 (0.7)",
+    "FINDING-002 found as FINDING-002 (0.7)",
+    "FINDING-003 found as FINDING-004 (0.85)"
+  ],
+  "missing_findings": [
+    "FINDING-004: Encrypted vault data lacks authenticated encryption (CWE-327, High)",
+    "FINDING-005: Master password policy permits four-character passwords (CWE-521, Medium)",
+    "FINDING-006: Missing Authorization on Favicon Retrieval Endpoint (CWE-285, High)",
+    "FINDING-009: Users can create notes on another user's secondary account (CWE-639, High)"
+  ],
+  "false_positives": [
+    "FINDING-003: Missing Authorization Policy Enforcement\u2014evidence shows both UseAuthentication() and UseAuthorization() are present; finding misinterprets middleware configuration",
+    "FINDING-005: Wildcard Host Configuration\u2014conflates host header validation with CORS/XSS; AllowedHosts: '*' is not a direct XSS vector and severity is overstated"
+  ],
+  "feedback": "The report demonstrates moderate quality with significant issues. Strengths: (1) Three findings correctly identify real cryptographic weaknesses (PRNG usage, weak KDF); (2) Evidence is generally well-sourced and exact; (3) Attack scenarios are concrete and realistic; (4) Remediation advice is specific and actionable; (5) OWASP/CWE mappings are mostly reasonable. Weaknesses: (1) Summary accuracy is poor\u2014claims 3 Critical findings when ground truth shows 0 Critical; severity inflation is systematic; (2) Two findings (FINDING-003, FINDING-005) are false positives based on misinterpretation of evidence; (3) Recall is low (43%)\u2014misses 4 important findings including broken access control on secondary accounts, weak password policy, missing AEAD encryption, and unauthenticated endpoints; (4) Precision is low (37.5%)\u20145 of 8 findings are either false positives or severity-inflated; (5) CWE mappings could be more precise (e.g., CWE-338 vs CWE-330 for PRNG). The report would benefit from: (1) Reducing severity inflation\u2014not all cryptographic issues are Critical; (2) Removing or revising false positives; (3) Deeper code inspection to catch authorization and access control issues; (4) More precise CWE selection. The agent found real issues but overclaimed severity and missed important access control vulnerabilities.",
+  "metadata": {
+    "evaluated_at": "2026-04-27T15:58:04.517797",
+    "judge_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "local_validation_passed": false,
+    "output_path": "/Users/raphaelkw/Documents/Codes/masterpassword-open/security/findings/eval_2026-04-27_15-55-24.json"
+  },
+  "local_validation": {
+    "parseable_json": true,
+    "passed": false,
+    "structure_errors": [],
+    "summary_errors": [
+      "summary.medium is 2, but findings contains 1.",
+      "summary.critical is 3, but findings contains 4."
+    ],
+    "finding_errors": []
+  },
+  "ground_truth_coverage": {
+    "available": true,
+    "match_threshold": 0.55,
+    "ground_truth_count": 7,
+    "agent_finding_count": 8,
+    "found_count": 3,
+    "missing_count": 4,
+    "unmatched_agent_count": 5,
+    "recall": 0.429,
+    "precision": 0.375,
+    "found_findings": [
+      {
+        "ground_truth_id": "FINDING-001",
+        "agent_id": "FINDING-001",
+        "confidence": 0.7,
+        "reasons": [
+          "overlapping evidence",
+          "same file",
+          "moderate text overlap (0.24)",
+          "same OWASP category",
+          "nearby line"
+        ]
+      },
+      {
+        "ground_truth_id": "FINDING-002",
+        "agent_id": "FINDING-002",
+        "confidence": 0.7,
+        "reasons": [
+          "overlapping evidence",
+          "same file",
+          "moderate text overlap (0.27)",
+          "same OWASP category",
+          "nearby line"
+        ]
+      },
+      {
+        "ground_truth_id": "FINDING-003",
+        "agent_id": "FINDING-004",
+        "confidence": 0.85,
+        "reasons": [
+          "same evidence",
+          "same file",
+          "strong text overlap (0.39)",
+          "same OWASP category",
+          "nearby line"
+        ]
+      }
+    ],
+    "missing_findings": [
+      {
+        "id": "FINDING-004",
+        "title": "Encrypted vault data lacks authenticated encryption",
+        "severity": "High",
+        "cwe": "CWE-327",
+        "file": "MasterPassword.BusinessLogic/Encryptor.cs",
+        "best_match_confidence": 0.35,
+        "best_match_reasons": [
+          "same file",
+          "same OWASP category"
+        ]
+      },
+      {
+        "id": "FINDING-005",
+        "title": "Master password policy permits four-character passwords",
+        "severity": "Medium",
+        "cwe": "CWE-521",
+        "file": "MasterPassword.BusinessLogic/AppConfiguration.cs",
+        "best_match_confidence": 0.06,
+        "best_match_reasons": [
+          "weak text overlap (0.11)"
+        ]
+      },
+      {
+        "id": "FINDING-006",
+        "title": "Missing Authorization on Favicon Retrieval Endpoint",
+        "severity": "High",
+        "cwe": "CWE-285",
+        "file": "/src/MasterPassword/Controllers/API/v1/FaviconsController.cs",
+        "best_match_confidence": 0.41,
+        "best_match_reasons": [
+          "same CWE",
+          "weak text overlap (0.17)",
+          "same OWASP category"
+        ]
+      },
+      {
+        "id": "FINDING-009",
+        "title": "Users can create notes on another user's secondary account",
+        "severity": "High",
+        "cwe": "CWE-639",
+        "file": "MasterPassword.BusinessLogic/RequestHandlers/CreateNote/CreateNoteRequestHandler.cs",
+        "best_match_confidence": 0.16,
+        "best_match_reasons": [
+          "weak text overlap (0.12)",
+          "same OWASP category"
+        ]
+      }
+    ],
+    "unmatched_agent_findings": [
+      {
+        "id": "FINDING-003",
+        "title": "Missing Authorization Policy Enforcement on Authentication Scheme",
+        "severity": "Critical",
+        "cwe": "CWE-285",
+        "file": "/src/MasterPassword/Startup.cs"
+      },
+      {
+        "id": "FINDING-005",
+        "title": "Wildcard Host Configuration Allows Cross-Site Scripting Attacks",
+        "severity": "High",
+        "cwe": "CWE-942",
+        "file": "/src/MasterPassword/appsettings.json"
+      },
+      {
+        "id": "FINDING-006",
+        "title": "Outdated MongoDB Driver with Remote Code Execution Vulnerability",
+        "severity": "Critical",
+        "cwe": "CWE-502",
+        "file": "/src/MasterPassword.DataAccess.MongoDbAtlas/MasterPassword.DataAccess.MongoDbAtlas.csproj"
+      },
+      {
+        "id": "FINDING-007",
+        "title": "Missing Secure Flag on Session Cookie",
+        "severity": "High",
+        "cwe": "CWE-614",
+        "file": "/src/MasterPassword/Startup.cs"
+      },
+      {
+        "id": "FINDING-008",
+        "title": "Weak PBKDF2 Iteration Count for Password Hashing",
+        "severity": "Medium",
+        "cwe": "CWE-916",
+        "file": "/src/MasterPassword.BusinessLogic/Encryptor.cs"
+      }
+    ]
+  }
+}

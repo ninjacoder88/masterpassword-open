@@ -23,10 +23,7 @@ src_path = os.path.join(local_path, "src")
 
 # eval report path (your provided path)
 eval_path = os.path.join(
-    local_path,
-    "security",
-    "findings",
-    "eval_2026-04-27_11-31-53.json"
+    local_path, "security", "findings", "eval_2026-04-27_14-45-09.json"
 )
 
 # -----------------------------

@@ -433,3 +433,6 @@ FodyWeavers.xsd
 #Local file
 .local/
 .report/
+
+# repo file in security folder
+security/repo/

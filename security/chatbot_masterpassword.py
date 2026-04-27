@@ -14,13 +14,7 @@ load_dotenv()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-faiss_db_path = os.path.join(
-    SCRIPT_DIR,
-    "..",
-    "..",
-    "vector_databases",
-    "master_password.faiss"
-)
+faiss_db_path = os.path.join(SCRIPT_DIR, "master_password.faiss")
 
 db = FAISS.load_local(
     faiss_db_path,
