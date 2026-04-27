@@ -33,6 +33,8 @@ Configuration knobs (all optional — sensible defaults are auto-detected):
                           Bedrock client. By default boto3 picks it up from
                           ``AWS_REGION`` / ``AWS_DEFAULT_REGION`` /
                           ``~/.aws/config`` like every other AWS SDK call.
+    OUTPUT_FILE           Optional. File path to redirect all standard output
+                          to. If not set, output goes to stdout as usual.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -57,7 +60,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 
-load_dotenv(overrides=True)
+load_dotenv(override=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths
@@ -803,6 +806,7 @@ def run_phase(
         backend=backend,
         skills=[skills_dir],
         system_prompt=system_prompt,
+        debug=True
     )
     final_output = ""
     for event in agent.stream({"messages": [{"role": "user", "content": task}]}):
@@ -1011,98 +1015,116 @@ def run_pipeline(
     app_root: str | None = None,
     language: str | None = None,
 ) -> None:
-    run_ts = datetime.now()
-    print("DeepAgent SAST — language-agnostic pipeline")
-    print("=" * 60)
-    print(f"Model:     {_MODEL_ID}")
-
-    cfg = build_repo_config(local_path, repo_url, app_root, language)
-    backend = _make_backend(cfg)
-
-    # ── Phase 1: Recon ───────────────────────────────────────────────────────
-    recon_prompt = build_recon_prompt(cfg)
-    recon_task = (
-        f"Perform reconnaissance on the {cfg.language} app rooted at "
-        f"`{cfg.app_root}`. Follow your system prompt exactly and emit a JSON "
-        f"code map. SCA manifests: {cfg.manifest_paths}."
-    )
-    recon_result = run_phase(
-        "Phase 1 — Recon",
-        recon_prompt,
-        recon_task,
-        backend=backend,
-        extra_tools=[cve_lookup],
-    )
+    # Handle output redirection
+    output_file = "/home/t/code/masterpassword-open/log.txt"
+    original_stdout = None
+    if output_file:
+        try:
+            output_fh = open(output_file, "w", encoding="utf-8")
+            original_stdout = sys.stdout
+            sys.stdout = output_fh
+        except OSError as e:
+            print(f"Warning: Could not open output file '{output_file}': {e}")
+            output_file = None
 
     try:
-        code_map = _parse_recon_json(recon_result)
-    except json.JSONDecodeError as e:
-        print(f"[Phase 1] FATAL: recon output is not valid JSON ({e})")
-        print(recon_result[:2000])
-        return
+        run_ts = datetime.now()
+        print("DeepAgent SAST — language-agnostic pipeline")
+        print("=" * 60)
+        print(f"Model:     {_MODEL_ID}")
 
-    # ── Phase 2: Concurrent Analysis ─────────────────────────────────────────
-    workers = int(os.environ.get("ANALYSIS_WORKERS", "4"))
-    chunk_files = int(os.environ.get("ANALYSIS_CHUNK_FILES", "6"))
-    candidate_findings = run_analysis_concurrent(
-        code_map, cfg.language, workers=workers, chunk_files=chunk_files
-    )
+        cfg = build_repo_config(local_path, repo_url, app_root, language)
+        backend = _make_backend(cfg)
 
-    # ── Phase 3: Triage & Report ─────────────────────────────────────────────
-    report_task = (
-        "Below is the merged list of candidate findings produced by parallel "
-        "analysis workers. Triage them and produce the final security report.\n\n"
-        "--- CANDIDATE FINDINGS ---\n" + json.dumps(candidate_findings, indent=2)
-    )
-    report_result = run_phase(
-        "Phase 3 — Report",
-        REPORT_PROMPT_TEMPLATE,
-        report_task,
-        backend=backend,
-    )
-
-    # ── Print + persist ──────────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print("FINAL SECURITY REPORT:")
-    raw = _strip_code_fence(report_result)
-    parsed = None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            try:
-                parsed = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                parsed = None
-
-    if not parsed:
-        print(report_result)
-        print("\n[WARNING] Could not parse report JSON — skipping file save.")
-        return
-
-    summary = parsed.get("summary", {})
-    print(
-        f"\nSummary: {summary.get('total_findings', '?')} findings "
-        f"| Critical: {summary.get('critical', 0)} "
-        f"| High: {summary.get('high', 0)} "
-        f"| Medium: {summary.get('medium', 0)} "
-        f"| Low: {summary.get('low', 0)}"
-    )
-    for finding in parsed.get("findings", []):
-        sev = finding.get("severity", "").upper()
-        print(f"\n[{sev}] {finding.get('id')} — {finding.get('title')}")
-        print(f"  File     : {finding.get('file')} (line {finding.get('line')})")
-        print(
-            f"  OWASP    : {finding.get('owasp_category')}  |  "
-            f"CWE: {finding.get('cwe')}"
+        # ── Phase 1: Recon ───────────────────────────────────────────────────────
+        recon_prompt = build_recon_prompt(cfg)
+        recon_task = (
+            f"Perform reconnaissance on the {cfg.language} app rooted at "
+            f"`{cfg.app_root}`. Follow your system prompt exactly and emit a JSON "
+            f"code map. SCA manifests: {cfg.manifest_paths}."
         )
-        print(f"  Evidence : {(finding.get('evidence') or '').strip()}")
-        print(f"  Impact   : {finding.get('attack_scenario', '')}")
-        print(f"  Fix      : {finding.get('remediation', '')}")
+        recon_result = run_phase(
+            "Phase 1 — Recon",
+            recon_prompt,
+            recon_task,
+            backend=backend,
+            extra_tools=[cve_lookup],
+        )
 
-    md_path, json_path = save_report(parsed, run_ts, cfg)
-    print(f"\nReport saved:\n  Markdown : {md_path}\n  JSON     : {json_path}")
+        try:
+            code_map = _parse_recon_json(recon_result)
+        except json.JSONDecodeError as e:
+            print(f"[Phase 1] FATAL: recon output is not valid JSON ({e})")
+            print(recon_result[:2000])
+            return
+
+        # ── Phase 2: Concurrent Analysis ─────────────────────────────────────────
+        workers = int(os.environ.get("ANALYSIS_WORKERS", "4"))
+        chunk_files = int(os.environ.get("ANALYSIS_CHUNK_FILES", "6"))
+        candidate_findings = run_analysis_concurrent(
+            code_map, cfg.language, workers=workers, chunk_files=chunk_files
+        )
+
+        # ── Phase 3: Triage & Report ─────────────────────────────────────────────
+        report_task = (
+            "Below is the merged list of candidate findings produced by parallel "
+            "analysis workers. Triage them and produce the final security report.\n\n"
+            "--- CANDIDATE FINDINGS ---\n" + json.dumps(candidate_findings, indent=2)
+        )
+        report_result = run_phase(
+            "Phase 3 — Report",
+            REPORT_PROMPT_TEMPLATE,
+            report_task,
+            backend=backend,
+        )
+
+        # ── Print + persist ──────────────────────────────────────────────────────
+        print("\n" + "=" * 60)
+        print("FINAL SECURITY REPORT:")
+        raw = _strip_code_fence(report_result)
+        parsed = None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    parsed = None
+
+        if not parsed:
+            print(report_result)
+            print("\n[WARNING] Could not parse report JSON — skipping file save.")
+            return
+
+        summary = parsed.get("summary", {})
+        print(
+            f"\nSummary: {summary.get('total_findings', '?')} findings "
+            f"| Critical: {summary.get('critical', 0)} "
+            f"| High: {summary.get('high', 0)} "
+            f"| Medium: {summary.get('medium', 0)} "
+            f"| Low: {summary.get('low', 0)}"
+        )
+        for finding in parsed.get("findings", []):
+            sev = finding.get("severity", "").upper()
+            print(f"\n[{sev}] {finding.get('id')} — {finding.get('title')}")
+            print(f"  File     : {finding.get('file')} (line {finding.get('line')})")
+            print(
+                f"  OWASP    : {finding.get('owasp_category')}  |  "
+                f"CWE: {finding.get('cwe')}"
+            )
+            print(f"  Evidence : {(finding.get('evidence') or '').strip()}")
+            print(f"  Impact   : {finding.get('attack_scenario', '')}")
+            print(f"  Fix      : {finding.get('remediation', '')}")
+
+        md_path, json_path = save_report(parsed, run_ts, cfg)
+        print(f"\nReport saved:\n  Markdown : {md_path}\n  JSON     : {json_path}")
+    finally:
+        if original_stdout:
+            sys.stdout.flush()
+            sys.stdout.close()
+            sys.stdout = original_stdout
 
 
 if __name__ == "__main__":
