@@ -1,10 +1,10 @@
 {
   "summary": {
-    "total_findings": 7,
+    "total_findings": 11,
     "critical": 0,
-    "high": 5,
-    "medium": 2,
-    "low": 0
+    "high": 6,
+    "medium": 4,
+    "low": 1
   },
   "findings": [
     {
@@ -74,7 +74,7 @@
     },
     {
       "id": "FINDING-006",
-     "title": "Missing Authorization on Favicon Retrieval Endpoint",
+      "title": "Missing Authorization on Favicon Retrieval Endpoint",
       "severity": "High",
       "owasp_category": "A01 - Broken Access Control",
       "cwe": "CWE-285",
@@ -84,6 +84,32 @@
       "evidence": "[HttpGet]",
       "attack_scenario": "An attacker can access favicon data without authentication, potentially exposing internal resources or enabling enumeration attacks. This could reveal information about the application's structure or internal systems.",
       "remediation": "Add the [Authorize] attribute to the Get method in FaviconsController.cs to require authentication before allowing favicon retrieval."
+    },
+    {
+      "id": "FINDING-007",
+      "title": "Hardcoded MongoDB connection string in development settings",
+      "severity": "Medium",
+      "owasp_category": "A05 - Security Misconfiguration",
+      "cwe": "CWE-943",
+      "file": "/src/MasterPassword/appsettings.Development.json",
+      "line": 10,
+      "description": "The development configuration contains a hardcoded MongoDB connection string. Even though it points at a local Docker host, committed connection settings can expose internal topology and are commonly copied into less-controlled deployments.",
+      "evidence": "\"ConnectionStrings\": {\n  \"MongoDbAtlas\": \"mongodb://host.docker.internal:27017\"\n}",
+      "attack_scenario": "If the development configuration is reused in staging or production, an attacker with access to deployed files can learn database connection details and internal host naming, making follow-on database access or network mapping easier.",
+      "remediation": "Remove connection strings from committed appsettings files and load them from environment variables, user secrets, or a managed secret store. Keep only non-sensitive placeholders in source control."
+    },
+    {
+      "id": "FINDING-008",
+      "title": "Insufficient PBKDF2 iteration count",
+      "severity": "Medium",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-916",
+      "file": "/src/MasterPassword.BusinessLogic/Encryptor.cs",
+      "line": 20,
+      "description": "Password hashes are derived with only 10,000 PBKDF2 iterations, which is below modern recommendations and reduces the cost of offline password cracking after database compromise.",
+      "evidence": "private const int Iterations = 10000;",
+      "attack_scenario": "An attacker who obtains the PrimaryAccounts collection can run offline guesses against password hashes faster than they could with a stronger work factor, increasing the chance of cracking weak master passwords.",
+      "remediation": "Increase PBKDF2 iterations to a current calibrated work factor, such as 100,000 or more based on server performance, and store KDF parameters with each hash for future upgrades."
     },
     {
       "id": "FINDING-009",
@@ -97,6 +123,32 @@
       "evidence": "//todo: add more validation relating to the secondary account belonging to the primary account\n...\nvar secondaryAccount = await Repository.LoadSecondaryAccountByIdAsync(request.SecondaryAccountId);\n...\nvar note = new Note { Title = encryptedTitle, Description = encryptedDescription, SecondaryAccountId = secondaryAccount._id.ToString() };",
       "attack_scenario": "An authenticated attacker who obtains or guesses a victim secondary account id can create notes attached to the victim's account. The victim may later load corrupted or attacker-controlled encrypted note data, causing integrity loss or denial of service for that account item.",
       "remediation": "Before creating the note, load the secondary account and require secondaryAccount.PrimaryAccountId == request.PrimaryAccountId. Return a generic authorization failure when ownership does not match."
+    },
+    {
+      "id": "FINDING-010",
+      "title": "Insufficient PBKDF2 output length",
+      "severity": "Medium",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-916",
+      "file": "/src/MasterPassword.BusinessLogic/Encryptor.cs",
+      "line": 30,
+      "description": "Password hashing derives only 20 bytes from PBKDF2. A 32-byte output is a more appropriate baseline for modern password hash storage and gives stronger margin for future cryptographic use.",
+      "evidence": "byte[] hash = pbkdf2.GetBytes(20);",
+      "attack_scenario": "If password hashes are stolen, the shorter derived hash output gives less security margin than modern 256-bit outputs while the low work factor already makes offline attacks cheaper.",
+      "remediation": "Derive at least 32 bytes from PBKDF2, use an explicit modern hash algorithm such as SHA-256 or SHA-512, and store versioned hash parameters for migration."
+    },
+    {
+      "id": "FINDING-011",
+      "title": "Deprecated RNGCryptoServiceProvider usage",
+      "severity": "Low",
+      "owasp_category": "A02 - Cryptographic Failures",
+      "cwe": "CWE-327",
+      "file": "/src/MasterPassword.BusinessLogic/Encryptor.cs",
+      "line": 42,
+      "description": "The code uses RNGCryptoServiceProvider to generate password-hash salts. The API is obsolete in modern .NET; RandomNumberGenerator should be used instead.",
+      "evidence": "new RNGCryptoServiceProvider().GetBytes(salt);",
+      "attack_scenario": "This is not immediately exploitable, but continued use of deprecated cryptographic APIs increases maintenance risk and may lead to weaker or unsupported implementations during future framework upgrades.",
+      "remediation": "Replace RNGCryptoServiceProvider with RandomNumberGenerator.Fill(salt) or RandomNumberGenerator.GetBytes for salt generation."
     }
   ]
 }
