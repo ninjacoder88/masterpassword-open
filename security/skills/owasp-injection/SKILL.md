@@ -1,5 +1,5 @@
 ---
-title: 'A05: Injection'
+name: 'A05: Injection'
 description: OWASP Web Top 10 reference for injection vulnerabilities including SQL, XSS, command injection, and related attack patterns
 ---
 

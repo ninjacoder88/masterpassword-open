@@ -1,0 +1,74 @@
+{
+  "instruction": "Validate and sanitize all user input at the API boundary, enforce Content-Type on mutations, prevent path traversal, command injection, SSRF, and mass assignment",
+  "relevant_when": "Agent handles user input in API endpoints, route handlers, file operations, shell commands, or outbound HTTP requests",
+  "context": "Every API endpoint that accepts user input must: (1) ALWAYS check Content-Type header on POST/PUT/PATCH requests as the FIRST operation and reject non-JSON with HTTP 415, (2) trim whitespace from all string inputs using .trim(), (3) validate required fields are present and non-empty after trimming, (4) enforce maximum length limits on strings, (5) parse and range-check numeric inputs using parseInt/Number and reject NaN, (6) validate enum values against a hard-coded allowed list, (7) always validate server-side even if frontend validation exists, (8) enforce business rules in the service layer including existence checks, stock/capacity constraints, status transition validation, and permission checks, (9) resolve file paths and verify they stay within allowed directories to prevent path traversal, (10) never pass user input to shell commands -- use execFile/spawn with argument arrays, (11) validate user-supplied URLs against a domain allowlist to prevent SSRF, (12) destructure only expected fields from request body to prevent mass assignment.",
+  "sources": [
+    {
+      "type": "file",
+      "filename": "skills/input-sanitization/SKILL.md",
+      "tile": "tessl-labs/input-sanitization@0.1.3"
+    }
+  ],
+  "checklist": [
+    {
+      "name": "content-type-checked",
+      "rule": "Agent checks the Content-Type header on POST/PUT/PATCH requests as the VERY FIRST operation in the handler and rejects non-JSON requests with HTTP 415 Unsupported Media Type. Uses req.is('application/json') in Express, request.is_json in Flask, r.Header.Get('Content-Type') in Go, or equivalent. This check MUST be present in every mutation endpoint.",
+      "relevant_when": "Agent creates or modifies API endpoints that accept POST, PUT, or PATCH requests"
+    },
+    {
+      "name": "strings-trimmed",
+      "rule": "Agent trims whitespace from all string inputs using .trim() (or .strip() in Python) before any further processing, validation, or storage",
+      "relevant_when": "Agent handles string input from API requests"
+    },
+    {
+      "name": "required-fields-checked",
+      "rule": "Agent validates that required fields are present and non-empty after trimming, returning HTTP 400 with a descriptive error message for missing or empty fields",
+      "relevant_when": "Agent handles POST/PUT/PATCH request bodies"
+    },
+    {
+      "name": "string-length-limited",
+      "rule": "Agent enforces explicit maximum length limits on string inputs (e.g., name.length > 100) and returns an error when exceeded",
+      "relevant_when": "Agent handles string input from API requests"
+    },
+    {
+      "name": "numeric-fields-parsed-and-checked",
+      "rule": "Agent parses numeric inputs with parseInt/Number (or int() in Python) and explicitly checks for NaN/invalid values AND checks the value is within a valid range (min/max bounds), rejecting invalid values with HTTP 400",
+      "relevant_when": "Agent handles numeric input including URL parameter IDs"
+    },
+    {
+      "name": "enum-validated-against-list",
+      "rule": "Agent validates enum/status values against an explicit hard-coded allowed list (e.g., VALID_STATUSES.includes(status)) and rejects unknown values with HTTP 400",
+      "relevant_when": "Agent handles input that should be one of a fixed set of values"
+    },
+    {
+      "name": "server-side-validation-present",
+      "rule": "Agent always validates input on the server side, never relying on frontend-only validation. Every field validated on the frontend must also be validated in the backend API handler.",
+      "relevant_when": "Agent implements input validation in any API endpoint"
+    },
+    {
+      "name": "business-rules-in-service-layer",
+      "rule": "Agent enforces meaningful business rules in the service layer, separate from basic input validation at the route level. Must include at least one of: existence verification (check referenced entities exist), capacity/stock constraints, status transition validation (e.g., cannot go from 'completed' back to 'received'), permission/authorization checks, or duplicate/idempotency checks.",
+      "relevant_when": "Agent implements business logic that depends on application state, cross-field relationships, or entity existence"
+    },
+    {
+      "name": "no-mass-assignment",
+      "rule": "Agent destructures only the expected fields from the request body before passing to create/update operations. Never passes req.body or request.json directly to database create/update calls.",
+      "relevant_when": "Agent creates or updates database records from request body data"
+    },
+    {
+      "name": "path-traversal-prevented",
+      "rule": "When user input is used in file paths, agent resolves the path with path.resolve/os.path.realpath and verifies the resolved path starts with the allowed base directory before accessing the file.",
+      "relevant_when": "Agent handles file paths, file downloads, or file uploads where the filename comes from user input"
+    },
+    {
+      "name": "no-shell-injection",
+      "rule": "Agent never passes user input to exec(), os.system(), or shell=True subprocess calls. Uses execFile/spawn with argument arrays (Node.js) or subprocess.run with a list (Python) instead.",
+      "relevant_when": "Agent executes system commands that involve user-provided values"
+    },
+    {
+      "name": "ssrf-prevented",
+      "rule": "When user input controls outbound HTTP request URLs, agent validates the URL protocol (HTTPS only) and hostname against an allowlist of trusted domains before making the request.",
+      "relevant_when": "Agent makes HTTP requests where the URL or hostname comes from user input"
+    }
+  ]
+}

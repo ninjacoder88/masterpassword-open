@@ -1,108 +1,515 @@
-from deepagents import create_deep_agent
-from deepagents.backends import FilesystemBackend
-from langchain_aws import ChatBedrockConverse
-from langchain_core.tools import tool
-from dotenv import load_dotenv
-from datetime import datetime
+"""
+DeepAgent SAST pipeline — language-agnostic edition.
+
+Originally written for a Django/Python target, this version supports any
+codebase (.NET / C#, Java, JavaScript/TypeScript, Go, Python, …) by:
+
+1. Auto-detecting language + project layout (or accepting overrides via env vars
+   / function args).
+2. Driving Phase 1 (recon) with a prompt that is built dynamically from a
+   `RepoConfig` instead of hard-coded Django paths.
+3. Splitting Phase 2 (analysis) across multiple concurrent LLM calls so a large
+   code map no longer blocks on a single multi-minute request.
+4. Writing all findings under the `security/` folder (this script's directory).
+
+Configuration knobs (all optional — sensible defaults are auto-detected):
+    REPO_URL              Git URL to clone (skipped if REPO_PATH or repo/ exist)
+    REPO_PATH             Local repo path (overrides clone target). May be the
+                          workspace root itself if you want to scan the current
+                          project.
+    APP_ROOT              Subdirectory inside the repo to focus the scan on
+                          (default: auto-detect, falls back to "/").
+    LANGUAGE              Force a specific language profile
+                          (csharp|python|java|javascript|go).
+    ANALYSIS_WORKERS      Number of concurrent Phase-2 LLM calls (default 4).
+    ANALYSIS_CHUNK_FILES  Number of source files per Phase-2 chunk (default 6).
+    BEDROCK_MODEL_ID      Bedrock model ID. Default
+                          ``qwen.qwen3-coder-30b-a3b-v1:0`` (matches the
+                          original demo). For accounts/regions that require a
+                          cross-region inference profile, pass the fully
+                          prefixed ID instead, e.g.
+                          ``us.qwen.qwen3-coder-30b-a3b-v1:0``.
+    BEDROCK_REGION        Optional. Override the AWS region used for the
+                          Bedrock client. By default boto3 picks it up from
+                          ``AWS_REGION`` / ``AWS_DEFAULT_REGION`` /
+                          ``~/.aws/config`` like every other AWS SDK call.
+"""
+
+from __future__ import annotations
+
 import json
 import os
-import requests
-import git
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable
+
 import boto3
+import git
+import requests
 from botocore.config import Config
+from deepagents import create_deep_agent
+from deepagents.backends import FilesystemBackend
+from dotenv import load_dotenv
+from langchain_aws import ChatBedrockConverse
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
 
 
 load_dotenv(overrides=True)
 
-# Git repo setup
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-repo_url = "https://github.com/redpointsec/vtm.git"
-repo_path = os.path.join(SCRIPT_DIR, "repo")
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # …/security
+WORKSPACE_ROOT = os.path.dirname(SCRIPT_DIR)
+FINDINGS_DIR = os.path.join(SCRIPT_DIR, "findings")  # security/findings/
 
-if os.path.isdir(repo_path) and os.path.isdir(os.path.join(repo_path, ".git")):
-    print("Directory already contains a git repository.")
-else:
-    try:
-        repo = git.Repo.clone_from(repo_url, repo_path)
-        print(f"Repository cloned into: {repo_path}")
-    except Exception as e:
-        print(f"An error occurred while cloning the repository: {e}")
-
-# LLM setup - lower temperature reduces hallucinated findings in code analysis
-# Increased read_timeout (default 60s) because Phase 1 builds large context before each LLM call
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM
+# ─────────────────────────────────────────────────────────────────────────────
 _bedrock_config = Config(
-    read_timeout=300,  # 5 minutes
+    read_timeout=300,
     retries={"max_attempts": 2, "mode": "adaptive"},
 )
+
+# Bedrock model. The default matches the original demo and is known to work
+# against the user's account/region. Override with BEDROCK_MODEL_ID if needed
+# (e.g. ``us.qwen.qwen3-coder-30b-a3b-v1:0`` for accounts that require the
+# cross-region inference-profile prefix).
+_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "qwen.qwen3-coder-30b-a3b-v1:0")
+
+# Let boto3 pick the region from the user's standard AWS config chain
+# (AWS_REGION / AWS_DEFAULT_REGION / ~/.aws/config). Override only if explicitly
+# requested via BEDROCK_REGION.
+_bedrock_client_kwargs = {"config": _bedrock_config}
+if os.environ.get("BEDROCK_REGION"):
+    _bedrock_client_kwargs["region_name"] = os.environ["BEDROCK_REGION"]
+
 llm = ChatBedrockConverse(
-    model_id="qwen.qwen3-coder-30b-a3b-v1:0",
+    model_id=_MODEL_ID,
     temperature=0.2,
-    client=boto3.client("bedrock-runtime", config=_bedrock_config),
+    client=boto3.client("bedrock-runtime", **_bedrock_client_kwargs),
 )
 
-# Backend for local filesystem access - points to the repo directory
-# virtual_mode=True restricts access to root_dir only (recommended for security)
-filesystem_backend = FilesystemBackend(root_dir=repo_path, virtual_mode=True)
 
-# Output directory: <workspace_root>/security_findings/
-WORKSPACE_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-FINDINGS_DIR = os.path.join(WORKSPACE_ROOT, "security_findings")
+# ─────────────────────────────────────────────────────────────────────────────
+# Language profiles
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class LanguageProfile:
+    name: str
+    extensions: tuple[str, ...]
+    manifest_files: tuple[str, ...]  # for SCA
+    osv_ecosystem: str | None  # ecosystem name in OSV.dev
+    project_markers: tuple[str, ...]  # files that mark an app root
+    high_value_filename_patterns: tuple[str, ...]  # regex for prioritised reads
+    ignore_dirs: tuple[str, ...]
+    vulnerability_hints: str  # appended into Phase-2 prompt
 
-print(f"Repo path: {repo_path}")
+
+_COMMON_IGNORES = (
+    ".git",
+    "node_modules",
+    "bin",
+    "obj",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".idea",
+    ".vscode",
+    "vendor",
+    "Pods",
+    "static",
+    "assets",
+    "media",
+    "uploads",
+    "fixtures",
+    "htmlcov",
+    "coverage",
+    "tests",
+    "test",
+    "__tests__",
+    "docs",
+)
+
+LANGUAGE_PROFILES: dict[str, LanguageProfile] = {
+    "csharp": LanguageProfile(
+        name="csharp",
+        extensions=(".cs", ".cshtml", ".razor", ".config", ".json"),
+        manifest_files=("*.csproj", "packages.config"),
+        osv_ecosystem="NuGet",
+        project_markers=("*.csproj", "*.sln"),
+        high_value_filename_patterns=(
+            r"Startup\.cs$",
+            r"Program\.cs$",
+            r"appsettings.*\.json$",
+            r".*Controller\.cs$",
+            r".*Handler\.cs$",
+            r".*Repository\.cs$",
+            r".*AuthenticationHandler\.cs$",
+            r".*Encryptor\.cs$",
+            r".*KeyDeriver\.cs$",
+            r".*TokenGenerator\.cs$",
+            r".*Configuration\.cs$",
+            r"web\.config$",
+        ),
+        ignore_dirs=_COMMON_IGNORES,
+        vulnerability_hints=(
+            "- ASP.NET Core: missing [Authorize], disabled antiforgery, "
+            "permissive CORS (`AllowAnyOrigin`), `UseDeveloperExceptionPage` in prod.\n"
+            "- Crypto: `MD5`, `SHA1`, `RijndaelManaged`, ECB mode, hard-coded keys/IVs, "
+            "`new Random()` for security tokens, weak PBKDF2 iteration counts.\n"
+            "- Injection: string-concatenated SQL, `SqlCommand` w/ interpolation, "
+            "`Process.Start` with user input, `XmlDocument` w/o disabling DTD.\n"
+            "- Deserialization: `BinaryFormatter`, `JavaScriptSerializer`, "
+            "`TypeNameHandling=All` in JSON.NET.\n"
+            "- Secrets in `appsettings.json` / connection strings.\n"
+            "- Cookies without `Secure`/`HttpOnly`/`SameSite`."
+        ),
+    ),
+    "python": LanguageProfile(
+        name="python",
+        extensions=(".py", ".cfg", ".ini", ".toml", ".yml", ".yaml"),
+        manifest_files=("requirements.txt", "pyproject.toml", "Pipfile"),
+        osv_ecosystem="PyPI",
+        project_markers=("manage.py", "pyproject.toml", "setup.py", "requirements.txt"),
+        high_value_filename_patterns=(
+            r"settings\.py$",
+            r"urls\.py$",
+            r"views\.py$",
+            r"models\.py$",
+            r"forms\.py$",
+            r"middleware\.py$",
+            r"serializers\.py$",
+            r"app\.py$",
+            r"main\.py$",
+            r"wsgi\.py$",
+            r"asgi\.py$",
+        ),
+        ignore_dirs=_COMMON_IGNORES + ("migrations",),
+        vulnerability_hints=(
+            "- Django: `DEBUG=True`, `ALLOWED_HOSTS=['*']`, `@csrf_exempt`, "
+            "`mark_safe()`, `raw()`/`extra()` SQL, mass-assignment via `**request.POST`.\n"
+            "- Flask: `debug=True`, `render_template_string` with user input.\n"
+            "- General: `eval`/`exec`, `pickle.loads`, `subprocess(... shell=True)`, "
+            "`yaml.load` w/o SafeLoader, hard-coded secrets."
+        ),
+    ),
+    "java": LanguageProfile(
+        name="java",
+        extensions=(".java", ".xml", ".properties", ".yml", ".yaml"),
+        manifest_files=("pom.xml", "build.gradle", "build.gradle.kts"),
+        osv_ecosystem="Maven",
+        project_markers=("pom.xml", "build.gradle", "build.gradle.kts"),
+        high_value_filename_patterns=(
+            r".*Application\.java$",
+            r".*Controller\.java$",
+            r".*Service\.java$",
+            r".*Repository\.java$",
+            r".*SecurityConfig.*\.java$",
+            r".*Filter\.java$",
+            r"application(-.*)?\.(properties|ya?ml)$",
+            r"web\.xml$",
+        ),
+        ignore_dirs=_COMMON_IGNORES,
+        vulnerability_hints=(
+            "- Spring Security misconfig (`permitAll`, disabled CSRF, "
+            '`@CrossOrigin("*")`).\n'
+            "- SQL injection via `Statement` / string-concat JPQL.\n"
+            "- `ObjectInputStream.readObject` (insecure deserialization).\n"
+            "- `Runtime.exec`, XXE in `DocumentBuilderFactory` w/o feature hardening, "
+            'weak crypto (`DES`, `MD5`, `Cipher.getInstance("AES")` defaulting to ECB).'
+        ),
+    ),
+    "javascript": LanguageProfile(
+        name="javascript",
+        extensions=(".js", ".jsx", ".ts", ".tsx", ".json", ".env"),
+        manifest_files=("package.json",),
+        osv_ecosystem="npm",
+        project_markers=("package.json",),
+        high_value_filename_patterns=(
+            r"server\.(js|ts)$",
+            r"app\.(js|ts)$",
+            r"index\.(js|ts)$",
+            r".*router.*\.(js|ts)$",
+            r".*middleware.*\.(js|ts)$",
+            r".*auth.*\.(js|ts)$",
+            r"\.env(\..*)?$",
+        ),
+        ignore_dirs=_COMMON_IGNORES,
+        vulnerability_hints=(
+            "- Express: missing `helmet`, permissive CORS, `eval`, "
+            "`child_process.exec` with user input, prototype pollution.\n"
+            "- JWT: `algorithm: 'none'`, hard-coded secrets, missing expiry.\n"
+            "- React/Next: `dangerouslySetInnerHTML`, SSRF in fetch."
+        ),
+    ),
+    "go": LanguageProfile(
+        name="go",
+        extensions=(".go", ".mod", ".sum", ".yaml", ".yml"),
+        manifest_files=("go.mod",),
+        osv_ecosystem="Go",
+        project_markers=("go.mod",),
+        high_value_filename_patterns=(
+            r"main\.go$",
+            r".*handler.*\.go$",
+            r".*server.*\.go$",
+            r".*router.*\.go$",
+            r".*auth.*\.go$",
+        ),
+        ignore_dirs=_COMMON_IGNORES,
+        vulnerability_hints=(
+            "- `database/sql` string-concat queries, `os/exec` with user input, "
+            "`html/template` vs `text/template` for HTML, weak `math/rand` for tokens, "
+            "missing TLS verification (`InsecureSkipVerify=true`)."
+        ),
+    ),
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Custom tool: CVE / SCA lookup via OSV.dev
-# This tool is NOT sandboxed by FilesystemBackend — it runs as regular Python
-# and makes outbound HTTPS calls to api.osv.dev.
+# Repo configuration / auto-detection
 # ─────────────────────────────────────────────────────────────────────────────
-@tool
-def cve_lookup(requirements_path: str) -> str:
+@dataclass
+class RepoConfig:
+    local_path: str  # absolute filesystem path to repo root
+    app_root: str  # virtual path inside repo (e.g. "/src" or "/")
+    language: str  # key into LANGUAGE_PROFILES
+    profile: LanguageProfile = field(init=False)
+    manifest_paths: list[str] = field(default_factory=list)  # absolute paths
+
+    def __post_init__(self):
+        self.profile = LANGUAGE_PROFILES[self.language]
+
+
+def _walk_files(root: str, ignore_dirs: Iterable[str]) -> list[str]:
+    """Return relative file paths under root, skipping ignored dirs."""
+    ignore = set(ignore_dirs)
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ignore and not d.startswith(".")]
+        for fname in filenames:
+            full = os.path.join(dirpath, fname)
+            out.append(os.path.relpath(full, root))
+    return out
+
+
+def _glob_match(name: str, pattern: str) -> bool:
+    if "*" not in pattern:
+        return name == pattern
+    regex = "^" + re.escape(pattern).replace(r"\*", ".*") + "$"
+    return re.match(regex, name) is not None
+
+
+def detect_language(local_path: str) -> str:
+    """Pick the language with the most source files in the repo."""
+    counts: dict[str, int] = {k: 0 for k in LANGUAGE_PROFILES}
+    for rel in _walk_files(local_path, _COMMON_IGNORES):
+        for lang, prof in LANGUAGE_PROFILES.items():
+            if rel.endswith(prof.extensions):
+                counts[lang] += 1
+                break
+    best = max(counts.items(), key=lambda kv: kv[1])
+    if best[1] == 0:
+        raise RuntimeError(f"No recognised source files under {local_path}")
+    return best[0]
+
+
+def detect_app_root(local_path: str, profile: LanguageProfile) -> str:
     """
-    Read a requirements.txt file, then query the OSV.dev API for known CVEs
-    (or any vulnerability) for each listed Python package.
-    Returns a JSON string summarising all vulnerabilities found.
-    Pass the full path to the requirements.txt file on disk.
+    Find the common-ancestor directory of all project markers and return it as
+    a virtual path (starts with '/'). Falls back to '/' if no markers found.
+    """
+    matches: list[str] = []
+    for rel in _walk_files(local_path, _COMMON_IGNORES):
+        base = os.path.basename(rel)
+        for marker in profile.project_markers:
+            if _glob_match(base, marker):
+                matches.append(os.path.dirname(rel))
+                break
+    if not matches:
+        return "/"
+    common = os.path.commonpath(matches) if len(matches) > 1 else matches[0]
+    return "/" + common.replace(os.sep, "/") if common else "/"
+
+
+def find_manifests(local_path: str, profile: LanguageProfile) -> list[str]:
+    """Absolute paths of all SCA manifest files in the repo."""
+    found: list[str] = []
+    for rel in _walk_files(local_path, _COMMON_IGNORES):
+        base = os.path.basename(rel)
+        for pat in profile.manifest_files:
+            if _glob_match(base, pat):
+                found.append(os.path.join(local_path, rel))
+                break
+    return found
+
+
+def build_repo_config(
+    local_path: str | None = None,
+    repo_url: str | None = None,
+    app_root: str | None = None,
+    language: str | None = None,
+) -> RepoConfig:
+    """Resolve repo on disk (clone if needed) and auto-detect its layout."""
+    local_path = local_path or os.environ.get("REPO_PATH")
+    repo_url = repo_url or os.environ.get("REPO_URL")
+    app_root = app_root or os.environ.get("APP_ROOT")
+    language = language or os.environ.get("LANGUAGE")
+
+    if not local_path:
+        # Default: clone into ./repo next to this script if a URL was given,
+        # otherwise scan the current workspace.
+        candidate = os.path.join(SCRIPT_DIR, "repo")
+        if repo_url:
+            if not os.path.isdir(os.path.join(candidate, ".git")):
+                print(f"Cloning {repo_url} -> {candidate}")
+                git.Repo.clone_from(repo_url, candidate)
+            local_path = candidate
+        elif os.path.isdir(os.path.join(candidate, ".git")):
+            local_path = candidate
+        else:
+            local_path = WORKSPACE_ROOT
+            print(f"No REPO_URL / REPO_PATH set — scanning workspace: {local_path}")
+
+    local_path = os.path.abspath(local_path)
+    if not os.path.isdir(local_path):
+        raise FileNotFoundError(f"Repo path does not exist: {local_path}")
+
+    if not language:
+        language = detect_language(local_path)
+    profile = LANGUAGE_PROFILES[language]
+
+    if not app_root:
+        app_root = detect_app_root(local_path, profile)
+
+    cfg = RepoConfig(
+        local_path=local_path,
+        app_root=app_root,
+        language=language,
+    )
+    cfg.manifest_paths = find_manifests(local_path, profile)
+
+    print(f"Repo:      {cfg.local_path}")
+    print(f"Language:  {cfg.language}")
+    print(f"App root:  {cfg.app_root}")
+    print(f"Manifests: {len(cfg.manifest_paths)} found")
+    return cfg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCA tool — multi-ecosystem
+# ─────────────────────────────────────────────────────────────────────────────
+def _parse_manifest(path: str, ecosystem: str) -> list[tuple[str, str | None]]:
+    """Return [(package, version or None), ...] for a single manifest file."""
+    try:
+        text = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return []
+
+    entries: list[tuple[str, str | None]] = []
+    base = os.path.basename(path)
+
+    if ecosystem == "PyPI":
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            for sep in ("==", ">=", "<=", "~=", "!="):
+                if sep in line:
+                    n, v = line.split(sep, 1)
+                    entries.append((n.strip(), v.split(",")[0].strip()))
+                    break
+            else:
+                entries.append((line, None))
+
+    elif ecosystem == "NuGet":
+        # PackageReference: <PackageReference Include="X" Version="1.2.3" />
+        for m in re.finditer(
+            r'PackageReference\s+Include="([^"]+)"\s+Version="([^"]+)"', text
+        ):
+            entries.append((m.group(1), m.group(2)))
+        # packages.config: <package id="X" version="1.2.3" />
+        for m in re.finditer(r'<package\s+id="([^"]+)"\s+version="([^"]+)"', text):
+            entries.append((m.group(1), m.group(2)))
+
+    elif ecosystem == "npm":
+        if base == "package.json":
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                return []
+            for section in ("dependencies", "devDependencies"):
+                for n, v in (data.get(section) or {}).items():
+                    entries.append((n, str(v).lstrip("^~>=< ")))
+
+    elif ecosystem == "Maven":
+        # naive pom.xml parse
+        for m in re.finditer(
+            r"<dependency>\s*<groupId>([^<]+)</groupId>\s*"
+            r"<artifactId>([^<]+)</artifactId>\s*<version>([^<]+)</version>",
+            text,
+        ):
+            entries.append((f"{m.group(1)}:{m.group(2)}", m.group(3)))
+
+    elif ecosystem == "Go":
+        for line in text.splitlines():
+            m = re.match(r"^\s*([A-Za-z0-9_./-]+)\s+(v[\w.\-+]+)", line)
+            if m:
+                entries.append((m.group(1), m.group(2)))
+
+    return entries
+
+
+@tool
+def cve_lookup(manifest_paths: str) -> str:
+    """
+    Query OSV.dev for known vulnerabilities in dependencies.
+
+    Pass a JSON object encoded as a string with keys:
+      - "ecosystem": one of "PyPI", "NuGet", "npm", "Maven", "Go"
+      - "paths": list of absolute paths to manifest files (e.g. requirements.txt,
+                 *.csproj, package.json, pom.xml, go.mod)
+
+    Example: '{"ecosystem":"NuGet","paths":["/repo/src/App/App.csproj"]}'
     """
     try:
-        with open(requirements_path) as fh:
-            lines = fh.readlines()
-    except FileNotFoundError:
-        return json.dumps({"error": f"File not found: {requirements_path}"})
+        payload = json.loads(manifest_paths)
+        ecosystem = payload["ecosystem"]
+        paths = payload["paths"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        return json.dumps({"error": f"Invalid input: {e}"})
+
+    deps: list[tuple[str, str | None]] = []
+    for p in paths:
+        deps.extend(_parse_manifest(p, ecosystem))
+
+    if not deps:
+        return json.dumps({"message": "No dependencies parsed from manifests."})
 
     results = []
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    seen: set[tuple[str, str | None]] = set()
+    for name, version in deps:
+        if (name, version) in seen:
             continue
-        # Parse "package==version", "package>=version", or bare "package"
-        for sep in ("==", ">=", "<=", "~=", "!="):
-            if sep in line:
-                name, version = line.split(sep, 1)
-                version = version.split(",")[0].strip()  # take first constraint
-                break
-        else:
-            name, version = line, None
-
-        name = name.strip()
-        payload: dict = {"package": {"name": name, "ecosystem": "PyPI"}}
+        seen.add((name, version))
+        body: dict = {"package": {"name": name, "ecosystem": ecosystem}}
         if version:
-            payload["version"] = version
-
+            body["version"] = version
         try:
-            resp = requests.post(
-                "https://api.osv.dev/v1/query",
-                json=payload,
-                timeout=10,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            r = requests.post("https://api.osv.dev/v1/query", json=body, timeout=10)
+            r.raise_for_status()
+            data = r.json()
         except requests.RequestException as exc:
             results.append({"package": name, "version": version, "error": str(exc)})
             continue
-
-        vulns = data.get("vulns", [])
-        for v in vulns:
+        for v in data.get("vulns", []):
             results.append(
                 {
                     "package": name,
@@ -122,124 +529,139 @@ def cve_lookup(requirements_path: str) -> str:
             )
 
     if not results:
-        return json.dumps({"message": "No known CVEs found for listed packages."})
+        return json.dumps({"message": "No known CVEs found."})
     return json.dumps(results, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase system prompts
+# Prompt builders (language-agnostic)
 # ─────────────────────────────────────────────────────────────────────────────
+def build_recon_prompt(cfg: RepoConfig) -> str:
+    prof = cfg.profile
+    ext_glob = "{" + ",".join(e.lstrip(".") for e in prof.extensions) + "}"
+    ignore_list = ", ".join(f"`{d}/`" for d in prof.ignore_dirs[:12])
+    high_value = "\n".join(
+        f"   - regex: `{p}`" for p in prof.high_value_filename_patterns
+    )
+    cve_arg = json.dumps({"ecosystem": prof.osv_ecosystem, "paths": cfg.manifest_paths})
 
-RECON_PROMPT = """You are a code reconnaissance agent performing the first step of a SAST pipeline.
+    return f"""You are a code reconnaissance agent performing the first step of a SAST pipeline.
 
-Your ONLY job is to map the application and collect raw material — do NOT label anything as vulnerable yet.
+Your ONLY job is to map the application and collect raw material — do NOT label
+anything as vulnerable yet.
 
-### Permitted tools — you may ONLY call these four, nothing else
+### Target
+- Language profile: **{prof.name}**
+- App root (virtual): **{cfg.app_root}**
+- Source extensions: {", ".join(prof.extensions)}
+
+### Permitted tools — you may ONLY call these four
 - `ls` — list a directory
 - `glob` — find files by pattern
-- `read_file` — read a file (NO offset/limit pagination; read each file once in full)
-- `cve_lookup` — check CVEs (call exactly once)
+- `read_file` — read a file in full (NO offset/limit)
+- `cve_lookup` — call exactly ONCE for SCA
 
-### FORBIDDEN — calling any of these ends the task in failure
-- `grep` — do NOT call grep under any circumstances
-- `write_file`, `edit_file` — do NOT write anything
-- Paginated `read_file` (with offset= or limit=) — do NOT paginate
+### FORBIDDEN
+- `grep`, `write_file`, `edit_file`, paginated reads.
 
 ### Exploration rules
-- All paths are ABSOLUTE virtual paths starting with `/`. The Django app lives at `/taskManager/`.
-- `ls(path='/taskManager')` ONCE only. Do NOT ls any subdirectory or the repo root.
-- `glob(pattern='**/*.py', path='/taskManager')` ONCE only. Do NOT glob from `/`.
-- Do NOT enter or list: `static/`, `media/`, `uploads/`, `templates/`, `migrations/`, `fixtures/`, `tests/`, `__pycache__/`, `.git/`, `node_modules/`, `htmlcov/`, `assets/`.
+- All paths are ABSOLUTE virtual paths starting with `/`.
+- `ls(path='{cfg.app_root}')` once.
+- `glob(pattern='**/*.{ext_glob}', path='{cfg.app_root}')` once.
+- Do NOT enter or list: {ignore_list}.
 
-### Required steps — execute in this exact order, then STOP
-1. `ls(path='/taskManager')` — once.
-2. `glob(pattern='**/*.py', path='/taskManager')` — once.
-3. `read_file` (no offset, no limit) on each file below that exists — skip missing ones:
-   - `/taskManager/settings.py`
-   - `/taskManager/urls.py` and any `*_urls.py` under `/taskManager/`
-   - `/taskManager/views.py`
-   - `/taskManager/models.py`
-   - `/taskManager/forms.py`
-   - `/taskManager/middleware.py`
-   - `/taskManager/serializers.py`
-   - `/taskManager/misc.py`
-4. `cve_lookup` — once, with the full path to `requirements.txt`.
-5. **Immediately emit the JSON below. Do NOT call any tool after cve_lookup — not grep, not ls, not read_file. Your very next output must be the JSON.**
+### High-value files to ALWAYS read if present
+{high_value}
 
-### Output Format
-Respond ONLY with a JSON object — no prose:
+### Required steps — execute in order, then STOP
+1. `ls(path='{cfg.app_root}')`
+2. `glob(pattern='**/*.{ext_glob}', path='{cfg.app_root}')`
+3. `read_file` on every file matching a high-value regex above (full content).
+4. Read 5-15 additional source files that look security-relevant
+   (controllers, auth, config, crypto, data access, deserialization).
+5. `cve_lookup` exactly once with this exact JSON string argument:
+   `{cve_arg}`
+6. Immediately emit the JSON code map below. Do NOT call any tool after `cve_lookup`.
 
+### Output Format — respond ONLY with JSON, no prose
 ```json
-{
+{{
+  "language": "{prof.name}",
+  "app_root": "{cfg.app_root}",
   "app_structure": ["list of key file paths discovered"],
-  "django_settings": {
-    "DEBUG": "<value>",
-    "ALLOWED_HOSTS": "<value>",
-    "SECRET_KEY": "<value or 'not found'>",
-    "MIDDLEWARE": ["list"],
-    "AUTH_PASSWORD_VALIDATORS": ["list"],
-    "SESSION_COOKIE_SECURE": "<value or 'not set'>",
-    "CSRF_COOKIE_SECURE": "<value or 'not set'>"
-  },
+  "config": {{
+    "<config-file-name>": "<key settings as JSON or excerpt>"
+  }},
   "endpoints": [
-    {"url_pattern": "<pattern>", "view": "<view name>", "requires_auth": true}
+    {{"route": "<url/route>", "handler": "<class.method>", "requires_auth": true}}
   ],
-  "code_snippets": {
-    "<relative/path.py>": "<full file content or key excerpt>"
-  },
-  "sca_findings": <raw output from cve_lookup tool, as a JSON array>
-}
+  "code_snippets": {{
+    "<relative/path.ext>": "<full file content>"
+  }},
+  "sca_findings": <raw output from cve_lookup, JSON array>
+}}
 ```
 """
 
-ANALYSIS_PROMPT = """You are a vulnerability analyst performing the second step of a SAST pipeline.
 
-You will receive a JSON code map produced by the recon agent. Analyse the code snippets and settings
-to identify ALL potential security vulnerabilities. Be thorough — err on the side of including more
-candidates here; they will be validated in the next step.
+def build_analysis_prompt(language: str) -> str:
+    prof = LANGUAGE_PROFILES[language]
+    return f"""You are a vulnerability analyst performing one slice of a SAST pipeline.
 
-Do NOT use the filesystem tools. Work only from the provided code map.
+You will receive a JSON object containing a SUBSET of files from the recon code map.
+Analyse these snippets together with the shared config / SCA context and identify
+ALL potential security vulnerabilities. Be thorough — err on inclusion; another
+agent will triage false positives later.
 
-### Vulnerability classes to check
-- **A01 Broken Access Control**: Missing `@login_required`, IDOR, horizontal privilege escalation
-- **A02 Cryptographic Failures**: Hardcoded secrets, weak hashing (MD5/SHA1 for passwords), plaintext storage
-- **A03 Injection**: `raw()`, `extra()`, `RawSQL()`, `cursor.execute()` with unsanitised input; `shell=True`; `eval`/`exec`
-- **A05 Security Misconfiguration**: `DEBUG=True`, `ALLOWED_HOSTS=['*']`, missing security middleware
-- **A07 Auth Failures**: Weak passwords, missing brute-force protection, insecure sessions
-- **A08 Data Integrity**: Mass assignment via `**request.POST`, unsafe deserialization
-- **Django-specific**: `@csrf_exempt`, `mark_safe()` on user input, `safe` template filter
-- **SCA / A06 Vulnerable Components**: Pull in any issues from `sca_findings` in the code map
+Do NOT use the filesystem tools — work only from the provided JSON.
 
-### Output Format
-Respond ONLY with a JSON array of candidate findings — no prose:
+### Universal vulnerability classes
+- A01 Broken Access Control (missing authz checks, IDOR, horizontal escalation)
+- A02 Cryptographic Failures (weak hashes, hard-coded keys, plaintext secrets,
+  weak random for tokens)
+- A03 Injection (SQL/NoSQL/command/LDAP/XPath, template injection)
+- A04 Insecure Design
+- A05 Security Misconfiguration (debug flags, permissive CORS, wildcard hosts,
+  missing security headers/cookies)
+- A06 Vulnerable & Outdated Components — pull from `sca_findings`
+- A07 Identification & Auth Failures (weak password policy, missing rate limit,
+  insecure sessions/JWT)
+- A08 Software & Data Integrity Failures (unsafe deserialization, mass-assignment)
+- A09 Security Logging Failures
+- A10 SSRF
 
+### {prof.name}-specific patterns to look for
+{prof.vulnerability_hints}
+
+### Output Format — respond ONLY with a JSON array, no prose
 ```json
 [
-  {
+  {{
     "file": "<relative path>",
     "line": <estimated line number or null>,
     "pattern": "<the exact code or setting that triggered this>",
     "vulnerability_class": "A0X - <Name>",
     "description": "<what is wrong and why it matters>",
     "source": "sast | sca"
-  }
+  }}
 ]
 ```
 """
 
-REPORT_PROMPT = """You are a senior application security engineer performing the final triage step of a SAST pipeline.
 
-You will receive a JSON array of candidate findings from the analysis agent. Your job is to:
-1. Remove false positives (e.g. findings neutralised by downstream sanitisation).
-2. Assign accurate severity: Critical / High / Medium / Low.
-3. Write a concrete attack scenario for each confirmed finding.
-4. Write a specific remediation (code change, Django setting, or library).
+REPORT_PROMPT_TEMPLATE = """You are a senior application security engineer performing the final triage step.
+
+You will receive a JSON array of candidate findings from multiple analysis workers.
+Your job is to:
+1. Deduplicate findings reported by multiple chunks.
+2. Remove false positives (e.g. neutralised by downstream sanitisation).
+3. Assign accurate severity: Critical / High / Medium / Low.
+4. Write a concrete attack scenario for each confirmed finding.
+5. Write a specific remediation (code change, config setting, or library swap).
 
 You MAY use the filesystem tools to verify a finding if you are unsure.
 
-### Output Format
-Respond ONLY with the final JSON report — no prose:
-
+### Output Format — respond ONLY with the JSON report, no prose
 ```json
 {
   "summary": {
@@ -268,27 +690,16 @@ Respond ONLY with the final JSON report — no prose:
 ```
 """
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Report persistence
 # ─────────────────────────────────────────────────────────────────────────────
-
-SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-
-
 def _sev_badge(sev: str) -> str:
-    return {
-        "critical": "CRITICAL",
-        "high": "HIGH",
-        "medium": "MEDIUM",
-        "low": "LOW",
-    }.get(sev.lower(), sev.upper())
+    return sev.upper()
 
 
-def save_report(parsed: dict, run_ts: datetime) -> tuple[str, str]:
-    """
-    Write <FINDINGS_DIR>/sast_<timestamp>.md and .json.
-    Returns (md_path, json_path).
-    """
+def save_report(parsed: dict, run_ts: datetime, cfg: RepoConfig) -> tuple[str, str]:
+    """Write findings/sast_<ts>.md and .json under the security/ folder."""
     os.makedirs(FINDINGS_DIR, exist_ok=True)
     slug = run_ts.strftime("%Y-%m-%d_%H-%M-%S")
     md_path = os.path.join(FINDINGS_DIR, f"sast_{slug}.md")
@@ -297,13 +708,13 @@ def save_report(parsed: dict, run_ts: datetime) -> tuple[str, str]:
     summary = parsed.get("summary", {})
     findings = parsed.get("findings", [])
 
-    # ── Markdown ──────────────────────────────────────────────────────────────
     lines = [
         "# SAST Security Report",
         "",
         f"**Run:** {run_ts.strftime('%Y-%m-%d %H:%M:%S')}  ",
-        f"**Target:** VTM (Django — `taskManager/`)  ",
-        f"**Model:** qwen.qwen3-coder-30b-a3b-v1:0",
+        f"**Target:** `{cfg.local_path}` (root `{cfg.app_root}`)  ",
+        f"**Language:** {cfg.language}  ",
+        f"**Model:** {_MODEL_ID}",
         "",
         "---",
         "",
@@ -322,7 +733,6 @@ def save_report(parsed: dict, run_ts: datetime) -> tuple[str, str]:
         "## Findings",
         "",
     ]
-
     for f in findings:
         sev = f.get("severity", "Unknown")
         lines += [
@@ -336,9 +746,9 @@ def save_report(parsed: dict, run_ts: datetime) -> tuple[str, str]:
             "",
             "**Evidence:**",
             "",
-            f"```",
-            f"{f.get('evidence', '').strip()}",
-            f"```",
+            "```",
+            f"{(f.get('evidence') or '').strip()}",
+            "```",
             "",
             f"**Description:** {f.get('description', '')}",
             "",
@@ -349,49 +759,35 @@ def save_report(parsed: dict, run_ts: datetime) -> tuple[str, str]:
             "---",
             "",
         ]
-
     with open(md_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
-
-    # ── JSON ──────────────────────────────────────────────────────────────────
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(parsed, fh, indent=2)
-
     return md_path, json_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase helpers
+# Phase runners
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def create_phase_agent(
-    system_prompt: str,
-    extra_tools: list = None,
-    backend=filesystem_backend,
-):
-    """Create a fresh DeepAgent for a single analysis phase."""
-    return create_deep_agent(
-        model=llm,
-        tools=extra_tools or [],
-        backend=backend,
-        system_prompt=system_prompt,
-    )
+def _make_backend(cfg: RepoConfig) -> FilesystemBackend:
+    return FilesystemBackend(root_dir=cfg.local_path, virtual_mode=True)
 
 
 def run_phase(
     phase_name: str,
     system_prompt: str,
     task: str,
-    extra_tools: list = None,
-    backend=filesystem_backend,
+    backend: FilesystemBackend,
+    extra_tools: list | None = None,
 ) -> str:
-    """
-    Run a single analysis phase: create a phase-specific agent, stream its
-    output, and return the final text response.
-    """
+    """Run an agent-driven phase (Phase 1 / Phase 3)."""
     print(f"\n[{phase_name}] Starting...")
-    agent = create_phase_agent(system_prompt, extra_tools, backend=backend)
+    agent = create_deep_agent(
+        model=llm,
+        tools=extra_tools or [],
+        backend=backend,
+        system_prompt=system_prompt,
+    )
     final_output = ""
     for event in agent.stream({"messages": [{"role": "user", "content": task}]}):
         for key, value in event.items():
@@ -412,91 +808,271 @@ def run_phase(
     return final_output
 
 
-if __name__ == "__main__":
-    run_ts = datetime.now()
-    print("DeepAgent SAST Demo — Multi-Phase Pipeline")
-    print("=" * 60)
+def _llm_call(system_prompt: str, task: str, label: str = "") -> str:
+    """
+    Streaming LLM call with per-token progress dots.
 
-    # ── Phase 1: Reconnaissance ───────────────────────────────────────────────
+    Uses ``llm.stream()`` instead of ``llm.invoke()`` so tokens are returned
+    as they are generated — the model runs at the same speed, but the caller
+    gets a live heartbeat instead of an opaque silence.  A dot is printed
+    every 50 tokens; on completion the elapsed time and total token count are
+    shown.
+
+    Thread-safe: each print includes the chunk label so output from concurrent
+    workers is distinguishable even when lines interleave.
+    """
+    import time
+
+    msgs = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
+    prefix = f"  [{label}] " if label else "  "
+    chunks: list[str] = []
+    token_count = 0
+    t0 = time.monotonic()
+
+    print(f"{prefix}streaming", end="", flush=True)
+    for chunk in llm.stream(msgs):
+        text = chunk.content if hasattr(chunk, "content") else str(chunk)
+        if text:
+            chunks.append(text)
+            token_count += len(text.split())  # word-level approximation
+            # Print a progress marker every 50 approximate tokens
+            if token_count % 50 < len(text.split()):
+                elapsed = time.monotonic() - t0
+                print(
+                    f"\n{prefix}  ~{token_count} tokens ({elapsed:.0f}s)",
+                    end="",
+                    flush=True,
+                )
+
+    elapsed = time.monotonic() - t0
+    print(f"\n{prefix}done (~{token_count} tokens, {elapsed:.1f}s)", flush=True)
+    return "".join(chunks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 — chunked, concurrent analysis
+# ─────────────────────────────────────────────────────────────────────────────
+def _strip_code_fence(text: str) -> str:
+    s = text.strip()
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    return s.strip()
+
+
+def _parse_recon_json(recon_output: str) -> dict:
+    raw = _strip_code_fence(recon_output)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
+
+def _chunk_files(files: dict[str, str], chunk_size: int) -> list[dict[str, str]]:
+    items = list(files.items())
+    return [dict(items[i : i + chunk_size]) for i in range(0, len(items), chunk_size)]
+
+
+def run_analysis_concurrent(
+    code_map: dict,
+    language: str,
+    workers: int,
+    chunk_files: int,
+) -> list[dict]:
+    """
+    Split `code_map["code_snippets"]` into chunks of `chunk_files` files each
+    and submit each chunk to an analysis LLM call in a thread pool of
+    `workers`. Returns the merged + locally-deduped list of candidate findings.
+    """
+    snippets: dict[str, str] = code_map.get("code_snippets", {}) or {}
+    config_blob = code_map.get("config", {})
+    sca = code_map.get("sca_findings", [])
+
+    chunks = _chunk_files(snippets, chunk_files)
+    if not chunks:
+        chunks = [{}]
+    print(
+        f"[Phase 2] Splitting {len(snippets)} files into {len(chunks)} chunk(s) "
+        f"of up to {chunk_files} files each, {workers} concurrent workers."
+    )
+
+    system_prompt = build_analysis_prompt(language)
+    sca_chunk_index = 0  # SCA findings analysed exactly once
+
+    def _build_task(idx: int, chunk: dict[str, str]) -> str:
+        partial_map = {
+            "language": language,
+            "app_root": code_map.get("app_root"),
+            "config": config_blob,
+            "code_snippets": chunk,
+            "sca_findings": sca if idx == sca_chunk_index else [],
+            "_chunk_info": f"chunk {idx + 1} of {len(chunks)}",
+        }
+        return (
+            "Below is a SUBSET of the recon code map. Analyse only these files "
+            "(plus the shared config / SCA findings) and return the JSON "
+            "candidate findings array.\n\n--- CODE MAP CHUNK ---\n"
+            + json.dumps(partial_map, indent=2)
+        )
+
+    def _run_one(idx: int, chunk: dict[str, str]) -> list[dict]:
+        label = f"chunk {idx + 1}/{len(chunks)}"
+        print(f"  [{label}] -> LLM ({len(chunk)} files)")
+        try:
+            raw = _llm_call(system_prompt, _build_task(idx, chunk), label=label)
+        except Exception as exc:
+            print(f"  [{label}] ERROR: {exc}")
+            return []
+        text = _strip_code_fence(raw)
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            m = re.search(r"\[.*\]", text, re.DOTALL)
+            if not m:
+                print(f"  [{label}] WARN: no JSON array in response")
+                return []
+            try:
+                parsed = json.loads(m.group(0))
+            except json.JSONDecodeError as e:
+                print(f"  [{label}] WARN: JSON parse failed ({e})")
+                return []
+        if isinstance(parsed, dict):
+            parsed = parsed.get("findings") or parsed.get("candidates") or []
+        if not isinstance(parsed, list):
+            return []
+        print(f"  [{label}] <- {len(parsed)} candidate(s)")
+        return parsed
+
+    all_findings: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_run_one, i, chunk): i for i, chunk in enumerate(chunks)}
+        for fut in as_completed(futures):
+            all_findings.extend(fut.result())
+
+    # Light dedup on (file, pattern, vulnerability_class)
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for f in all_findings:
+        key = (
+            f.get("file"),
+            (f.get("pattern") or "")[:120],
+            f.get("vulnerability_class"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(f)
+    print(
+        f"[Phase 2] Collected {len(all_findings)} candidate(s) "
+        f"-> {len(deduped)} after local dedup."
+    )
+    return deduped
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+def run_pipeline(
+    local_path: str | None = None,
+    repo_url: str | None = None,
+    app_root: str | None = None,
+    language: str | None = None,
+) -> None:
+    run_ts = datetime.now()
+    print("DeepAgent SAST — language-agnostic pipeline")
+    print("=" * 60)
+    print(f"Model:     {_MODEL_ID}")
+
+    cfg = build_repo_config(local_path, repo_url, app_root, language)
+    backend = _make_backend(cfg)
+
+    # ── Phase 1: Recon ───────────────────────────────────────────────────────
+    recon_prompt = build_recon_prompt(cfg)
     recon_task = (
-        "Collect the Django app source using ONLY these tools in order: "
-        "ls, glob, read_file (no pagination), cve_lookup. "
-        "Do NOT call grep, write_file, edit_file, or any other tool. "
-        "App is at `/taskManager/`. "
-        "Use `glob(pattern='**/*.py', path='/taskManager')` — do NOT glob from `/`. "
-        f"Call `cve_lookup` exactly once with the path '{repo_path}/requirements.txt'. "
-        "After cve_lookup finishes, your next output MUST be the JSON code map — "
-        "do not call any more tools."
+        f"Perform reconnaissance on the {cfg.language} app rooted at "
+        f"`{cfg.app_root}`. Follow your system prompt exactly and emit a JSON "
+        f"code map. SCA manifests: {cfg.manifest_paths}."
     )
     recon_result = run_phase(
         "Phase 1 — Recon",
-        RECON_PROMPT,
+        recon_prompt,
         recon_task,
+        backend=backend,
         extra_tools=[cve_lookup],
     )
 
-    # ── Phase 2: Vulnerability Analysis ──────────────────────────────────────
-    analysis_task = (
-        "Below is the code map produced by the reconnaissance agent.\n"
-        "Analyse it and identify all candidate vulnerabilities.\n"
-        "Return only the JSON candidate findings array described in your instructions.\n\n"
-        "--- CODE MAP ---\n" + recon_result
-    )
-    analysis_result = run_phase(
-        "Phase 2 — Analysis",
-        ANALYSIS_PROMPT,
-        analysis_task,
-        backend=None,  # No filesystem access — analysis works purely from the code map text
+    try:
+        code_map = _parse_recon_json(recon_result)
+    except json.JSONDecodeError as e:
+        print(f"[Phase 1] FATAL: recon output is not valid JSON ({e})")
+        print(recon_result[:2000])
+        return
+
+    # ── Phase 2: Concurrent Analysis ─────────────────────────────────────────
+    workers = int(os.environ.get("ANALYSIS_WORKERS", "4"))
+    chunk_files = int(os.environ.get("ANALYSIS_CHUNK_FILES", "6"))
+    candidate_findings = run_analysis_concurrent(
+        code_map, cfg.language, workers=workers, chunk_files=chunk_files
     )
 
-    # ── Phase 3: Triage & Report ──────────────────────────────────────────────
+    # ── Phase 3: Triage & Report ─────────────────────────────────────────────
     report_task = (
-        "Below is the list of candidate findings produced by the analysis agent.\n"
-        "Triage them and produce the final security report.\n"
-        "Return only the JSON report described in your instructions.\n\n"
-        "--- CANDIDATE FINDINGS ---\n" + analysis_result
+        "Below is the merged list of candidate findings produced by parallel "
+        "analysis workers. Triage them and produce the final security report.\n\n"
+        "--- CANDIDATE FINDINGS ---\n" + json.dumps(candidate_findings, indent=2)
     )
     report_result = run_phase(
         "Phase 3 — Report",
-        REPORT_PROMPT,
+        REPORT_PROMPT_TEMPLATE,
         report_task,
+        backend=backend,
     )
 
-    # ── Print final report ────────────────────────────────────────────────────
+    # ── Print + persist ──────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("FINAL SECURITY REPORT:")
-
-    raw = report_result.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    raw = _strip_code_fence(report_result)
+    parsed = None
     try:
         parsed = json.loads(raw)
-        summary = parsed.get("summary", {})
-        print(
-            f"\nSummary: {summary.get('total_findings', '?')} findings "
-            f"| Critical: {summary.get('critical', 0)} "
-            f"| High: {summary.get('high', 0)} "
-            f"| Medium: {summary.get('medium', 0)} "
-            f"| Low: {summary.get('low', 0)}"
-        )
-        print()
-        for finding in parsed.get("findings", []):
-            sev = finding.get("severity", "").upper()
-            print(f"[{sev}] {finding.get('id')} — {finding.get('title')}")
-            print(f"  File     : {finding.get('file')} (line {finding.get('line')})")
-            print(
-                f"  OWASP    : {finding.get('owasp_category')}  |  CWE: {finding.get('cwe')}"
-            )
-            print(f"  Evidence : {finding.get('evidence', '').strip()}")
-            print(f"  Impact   : {finding.get('attack_scenario', '')}")
-            print(f"  Fix      : {finding.get('remediation', '')}")
-            print()
-        print("--- Raw JSON ---")
-        print(json.dumps(parsed, indent=2))
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                parsed = None
 
-        # ── Persist to disk ───────────────────────────────────────────────────
-        md_path, json_path = save_report(parsed, run_ts)
-        print(f"\nReport saved:")
-        print(f"  Markdown : {md_path}")
-        print(f"  JSON     : {json_path}")
-    except (json.JSONDecodeError, ValueError):
+    if not parsed:
         print(report_result)
         print("\n[WARNING] Could not parse report JSON — skipping file save.")
+        return
+
+    summary = parsed.get("summary", {})
+    print(
+        f"\nSummary: {summary.get('total_findings', '?')} findings "
+        f"| Critical: {summary.get('critical', 0)} "
+        f"| High: {summary.get('high', 0)} "
+        f"| Medium: {summary.get('medium', 0)} "
+        f"| Low: {summary.get('low', 0)}"
+    )
+    for finding in parsed.get("findings", []):
+        sev = finding.get("severity", "").upper()
+        print(f"\n[{sev}] {finding.get('id')} — {finding.get('title')}")
+        print(f"  File     : {finding.get('file')} (line {finding.get('line')})")
+        print(
+            f"  OWASP    : {finding.get('owasp_category')}  |  "
+            f"CWE: {finding.get('cwe')}"
+        )
+        print(f"  Evidence : {(finding.get('evidence') or '').strip()}")
+        print(f"  Impact   : {finding.get('attack_scenario', '')}")
+        print(f"  Fix      : {finding.get('remediation', '')}")
+
+    md_path, json_path = save_report(parsed, run_ts, cfg)
+    print(f"\nReport saved:\n  Markdown : {md_path}\n  JSON     : {json_path}")
+
+
+if __name__ == "__main__":
+    run_pipeline()
