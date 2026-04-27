@@ -28,6 +28,9 @@ from langchain_core.prompts import PromptTemplate
 
 load_dotenv()
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SOURCE_ROOT = REPO_ROOT / "src"
+
 
 REPORT_CONTRACT = """The SAST agent must return only this JSON report shape:
 {
@@ -390,8 +393,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report", required=True, help="Path to SAST report JSON.")
     parser.add_argument(
         "--source-root",
-        default=None,
-        help="Optional source root used to verify referenced file/line evidence.",
+        default=str(DEFAULT_SOURCE_ROOT),
+        help="Source root used to verify referenced file/line evidence. Defaults to repository src/.",
     )
     parser.add_argument(
         "--candidate-findings",
