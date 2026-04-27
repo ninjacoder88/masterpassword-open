@@ -1,0 +1,32 @@
+# DeepAgent SAST — runtime dependencies
+#
+# Tested on Python 3.12 (conda env `python3.12`).
+# Cross-platform: works on Apple Silicon macOS (arm64) and Windows (x64).
+# All packages below ship pure-Python or pre-built wheels for both platforms,
+# so no native toolchain is required.
+#
+# Install:
+#     python -m pip install -r security/requirements.txt
+#
+# AWS credentials must be configured separately (e.g. `aws configure`,
+# AWS_PROFILE, or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY env vars), and
+# the IAM principal needs `bedrock:InvokeModel` / `bedrock:Converse` for the
+# target inference profile (e.g. `us.qwen.qwen3-coder-30b-a3b-v1:0`).
+
+# --- Agent framework ---------------------------------------------------------
+deepagents>=0.2.0
+langchain>=0.3.27
+langchain-core>=0.3.60
+langchain-aws>=0.2.20
+langgraph>=0.6.0
+
+# --- AWS SDK -----------------------------------------------------------------
+boto3>=1.40.0
+botocore>=1.40.0
+
+# --- Repo + HTTP -------------------------------------------------------------
+GitPython>=3.1.43
+requests>=2.32.0
+
+# --- Config ------------------------------------------------------------------
+python-dotenv>=1.0.1
