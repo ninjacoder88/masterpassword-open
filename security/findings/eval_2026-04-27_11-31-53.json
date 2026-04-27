@@ -1,0 +1,202 @@
+{
+  "scores": {
+    "summary_score": 0.95,
+    "finding_validity_score": 0.65,
+    "severity_score": 0.7,
+    "taxonomy_score": 0.95,
+    "evidence_score": 0.6,
+    "attack_scenario_score": 0.75,
+    "remediation_score": 0.8,
+    "precision_score": 0.333,
+    "recall_score": 0.125,
+    "overall_score": 0.52
+  },
+  "verdict": "fail",
+  "finding_reviews": [
+    {
+      "id": "FINDING-001",
+      "valid": false,
+      "severity_correct": true,
+      "recommended_severity": "Low",
+      "issues": [
+        "Password generation endpoints are typically public utility services and do not require authentication in many password manager architectures",
+        "Evidence points to line 15 which is inside the method body, not the method declaration; the [HttpGet] attribute is on line 10",
+        "Attack scenario overstates impact: resource exhaustion is mitigated by rate limiting at infrastructure level, and password generation is a low-value target",
+        "No evidence that this endpoint is actually exposed without authorization in the running application"
+      ],
+      "feedback": "This finding conflates missing [Authorize] with a security vulnerability. Password generation endpoints are often intentionally public. The severity should be Low or the finding should be reconsidered. The line number is inaccurate."
+    },
+    {
+      "id": "FINDING-002",
+      "valid": true,
+      "severity_correct": true,
+      "recommended_severity": "High",
+      "issues": [
+        "Line number 15 points to the method body, not the attribute; [HttpGet] is on line 13",
+        "The finding correctly identifies a real authorization gap, but the impact assessment is weak\u2014favicon retrieval alone does not typically expose sensitive data unless the handler performs privileged operations"
+      ],
+      "feedback": "Valid finding. Favicon endpoints should be protected if they perform privileged operations or access user-specific data. However, the line reference is off by 2. The attack scenario should clarify what sensitive data is actually exposed."
+    },
+    {
+      "id": "FINDING-003",
+      "valid": false,
+      "severity_correct": false,
+      "recommended_severity": "High",
+      "issues": [
+        "Line 32 does not contain the method declaration; it is inside the method body. The [HttpGet(\"Refresh\")] attribute is not shown in the provided snippet",
+        "The evidence snippet shows HttpContext.GetUserId() being called, which suggests the endpoint does perform authentication checks via context extraction, contradicting the 'missing authorization' claim",
+        "If the endpoint extracts userId from HttpContext, it likely relies on middleware-level authentication rather than [Authorize] attribute, which is a valid pattern",
+        "Severity downgraded from Medium to High because if truly unauthenticated, session refresh is a critical bypass vector"
+      ],
+      "feedback": "This finding is questionable. The evidence shows HttpContext.GetUserId() being called, which implies authentication is enforced upstream (middleware). The agent may have misidentified the authorization pattern. If the endpoint is truly unauthenticated, severity should be High, not Medium. Line reference is inaccurate."
+    }
+  ],
+  "found_findings": [
+    "FINDING-006 found as FINDING-002 (1.0)"
+  ],
+  "missing_findings": [
+    "FINDING-001: Authentication tokens generated with predictable PRNG (CWE-338, High)",
+    "FINDING-002: Generated passwords use predictable PRNG (CWE-338, High)",
+    "FINDING-003: Vault encryption key is derived by base64 truncation instead of a KDF (CWE-916, High)",
+    "FINDING-004: Encrypted vault data lacks authenticated encryption (CWE-327, High)",
+    "FINDING-005: Master password policy permits four-character passwords (CWE-521, Medium)",
+    "FINDING-009: Users can create notes on another user's secondary account (CWE-639, High)",
+    "FINDING-010: Public favicon refresh endpoint can trigger server-side requests (CWE-918, Medium)"
+  ],
+  "false_positives": [
+    "FINDING-001 (Missing Authorization on Password Generation Endpoint - likely false positive; password generation is often intentionally public)",
+    "FINDING-003 (Missing Authorization on Session Refresh Endpoint - likely false positive; evidence suggests middleware-level authentication)"
+  ],
+  "feedback": "The report demonstrates poor recall (12.5%) and moderate precision (33%). The agent identified only 1 of 8 ground-truth findings and produced 2 questionable findings. Critical gaps include:\n\n**Major Issues:**\n1. **Cryptographic failures completely missed**: The codebase uses System.Random for security tokens and passwords (CWE-338), base64 truncation for key derivation (CWE-916), and unauthenticated encryption (CWE-327). These are high-severity findings that the agent did not detect.\n2. **Authorization findings are shallow**: The agent focused narrowly on missing [Authorize] attributes without understanding the application's authentication architecture. Evidence suggests some endpoints use middleware-level authentication, not attribute-based.\n3. **Line number accuracy**: Multiple findings reference incorrect line numbers (e.g., FINDING-001 line 15 is inside the method body, not the declaration).\n4. **Weak evidence correlation**: The agent provided minimal code context and did not verify that endpoints are actually exposed without authentication.\n5. **Missing business logic vulnerabilities**: FINDING-009 (cross-user note creation) and FINDING-010 (SSRF via favicon refresh) represent authorization and injection flaws that require deeper code analysis.\n\n**Strengths:**\n- Correct OWASP/CWE taxonomy for findings that were identified.\n- Clear remediation guidance for the findings reported.\n- Proper JSON structure and formatting.\n- Reasonable attack scenarios for the findings included.\n\n**Recommendations:**\n- Expand analysis to cryptographic libraries and key derivation logic.\n- Verify authorization patterns (middleware vs. attributes) before reporting.\n- Analyze business logic for cross-user access violations.\n- Validate line numbers against actual source code.\n- Investigate outbound request handlers for SSRF risks.\n\nThe report is not suitable for production use due to low recall and unvalidated authorization findings.",
+  "metadata": {
+    "evaluated_at": "2026-04-27T12:59:45.607302",
+    "judge_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "local_validation_passed": true
+  },
+  "local_validation": {
+    "parseable_json": true,
+    "passed": true,
+    "structure_errors": [],
+    "summary_errors": [],
+    "finding_errors": []
+  },
+  "ground_truth_coverage": {
+    "available": true,
+    "match_threshold": 0.55,
+    "ground_truth_count": 8,
+    "agent_finding_count": 3,
+    "found_count": 1,
+    "missing_count": 7,
+    "unmatched_agent_count": 2,
+    "recall": 0.125,
+    "precision": 0.333,
+    "found_findings": [
+      {
+        "ground_truth_id": "FINDING-006",
+        "agent_id": "FINDING-002",
+        "confidence": 1.0,
+        "reasons": [
+          "same title",
+          "same evidence",
+          "same CWE",
+          "same file",
+          "strong text overlap (1.00)",
+          "same OWASP category",
+          "nearby line"
+        ]
+      }
+    ],
+    "missing_findings": [
+      {
+        "id": "FINDING-001",
+        "title": "Authentication tokens generated with predictable PRNG",
+        "severity": "High",
+        "cwe": "CWE-338",
+        "file": "MasterPassword.BusinessLogic/TokenGenerator.cs",
+        "best_match_confidence": 0.0,
+        "best_match_reasons": []
+      },
+      {
+        "id": "FINDING-002",
+        "title": "Generated passwords use predictable PRNG",
+        "severity": "High",
+        "cwe": "CWE-338",
+        "file": "MasterPassword.BusinessLogic/RequestHandlers/GeneratePassword/GeneratePasswordRequestHandler.cs",
+        "best_match_confidence": 0.11,
+        "best_match_reasons": [
+          "weak text overlap (0.13)",
+          "nearby line"
+        ]
+      },
+      {
+        "id": "FINDING-003",
+        "title": "Vault encryption key is derived by base64 truncation instead of a KDF",
+        "severity": "High",
+        "cwe": "CWE-916",
+        "file": "MasterPassword.BusinessLogic/KeyDeriver.cs",
+        "best_match_confidence": 0.05,
+        "best_match_reasons": [
+          "nearby line"
+        ]
+      },
+      {
+        "id": "FINDING-004",
+        "title": "Encrypted vault data lacks authenticated encryption",
+        "severity": "High",
+        "cwe": "CWE-327",
+        "file": "MasterPassword.BusinessLogic/Encryptor.cs",
+        "best_match_confidence": 0.0,
+        "best_match_reasons": []
+      },
+      {
+        "id": "FINDING-005",
+        "title": "Master password policy permits four-character passwords",
+        "severity": "Medium",
+        "cwe": "CWE-521",
+        "file": "MasterPassword.BusinessLogic/AppConfiguration.cs",
+        "best_match_confidence": 0.0,
+        "best_match_reasons": []
+      },
+      {
+        "id": "FINDING-009",
+        "title": "Users can create notes on another user's secondary account",
+        "severity": "High",
+        "cwe": "CWE-639",
+        "file": "MasterPassword.BusinessLogic/RequestHandlers/CreateNote/CreateNoteRequestHandler.cs",
+        "best_match_confidence": 0.1,
+        "best_match_reasons": [
+          "same OWASP category"
+        ]
+      },
+      {
+        "id": "FINDING-010",
+        "title": "Public favicon refresh endpoint can trigger server-side requests",
+        "severity": "Medium",
+        "cwe": "CWE-918",
+        "file": "MasterPassword/Controllers/API/v1/FaviconsController.cs",
+        "best_match_confidence": 0.29,
+        "best_match_reasons": [
+          "overlapping evidence",
+          "weak text overlap (0.17)",
+          "nearby line"
+        ]
+      }
+    ],
+    "unmatched_agent_findings": [
+      {
+        "id": "FINDING-001",
+        "title": "Missing Authorization on Password Generation Endpoint",
+        "severity": "High",
+        "cwe": "CWE-285",
+        "file": "/src/MasterPassword/Controllers/API/v1/PasswordController.cs"
+      },
+      {
+        "id": "FINDING-003",
+        "title": "Missing Authorization on Session Refresh Endpoint",
+        "severity": "Medium",
+        "cwe": "CWE-285",
+        "file": "/src/MasterPassword/Controllers/API/v1/SessionController.cs"
+      }
+    ]
+  }
+}

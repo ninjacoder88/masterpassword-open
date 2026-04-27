@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -115,6 +116,22 @@ class ReportEvaluationRequest:
     temperature: float = 0.1
 
 
+@dataclass
+class FindingMatch:
+    ground_truth_id: str
+    agent_id: str
+    confidence: float
+    reasons: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ground_truth_id": self.ground_truth_id,
+            "agent_id": self.agent_id,
+            "confidence": round(self.confidence, 3),
+            "reasons": self.reasons,
+        }
+
+
 def strip_json_fence(text: str) -> str:
     raw = text.strip()
     if raw.startswith("```json"):
@@ -209,9 +226,211 @@ def validate_report(report: Any) -> LocalValidation:
     )
 
 
+def normalize_text(value: Any) -> str:
+    text = str(value or "").lower()
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def normalize_file_path(value: Any) -> str:
+    path = str(value or "").replace("\\", "/").strip().lower()
+    path = re.sub(r"^[a-z]:/", "", path)
+    path = path.lstrip("/")
+    if path.startswith("src/"):
+        path = path[4:]
+    return path
+
+
+def token_set(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(token for token in normalize_text(value).split() if len(token) > 2)
+    return tokens
+
+
+def token_overlap_score(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def finding_label(finding: dict[str, Any]) -> str:
+    return "{}: {} ({}, {})".format(
+        finding.get("id", "unknown"),
+        finding.get("title", "untitled"),
+        finding.get("cwe", "no CWE"),
+        finding.get("severity", "no severity"),
+    )
+
+
+def score_finding_match(ground_truth: dict[str, Any], agent_finding: dict[str, Any]) -> tuple[float, list[str]]:
+    score = 0.0
+    reasons: list[str] = []
+
+    gt_title = normalize_text(ground_truth.get("title"))
+    agent_title = normalize_text(agent_finding.get("title"))
+    gt_evidence = normalize_text(ground_truth.get("evidence"))
+    agent_evidence = normalize_text(agent_finding.get("evidence"))
+
+    if gt_title and agent_title and gt_title == agent_title:
+        score += 0.35
+        reasons.append("same title")
+    elif gt_title and agent_title:
+        title_overlap = token_overlap_score(set(gt_title.split()), set(agent_title.split()))
+        if title_overlap >= 0.45:
+            score += 0.2
+            reasons.append(f"similar title ({title_overlap:.2f})")
+
+    if gt_evidence and agent_evidence:
+        if gt_evidence == agent_evidence:
+            score += 0.25
+            reasons.append("same evidence")
+        elif gt_evidence in agent_evidence or agent_evidence in gt_evidence:
+            score += 0.18
+            reasons.append("overlapping evidence")
+
+    gt_cwe = str(ground_truth.get("cwe") or "").upper()
+    agent_cwe = str(agent_finding.get("cwe") or "").upper()
+    if gt_cwe and agent_cwe and gt_cwe == agent_cwe:
+        score += 0.25
+        reasons.append("same CWE")
+
+    gt_file = normalize_file_path(ground_truth.get("file"))
+    agent_file = normalize_file_path(agent_finding.get("file"))
+    if gt_file and agent_file:
+        if gt_file == agent_file:
+            score += 0.25
+            reasons.append("same file")
+        elif gt_file.endswith(agent_file) or agent_file.endswith(gt_file):
+            score += 0.2
+            reasons.append("compatible file path")
+
+    gt_tokens = token_set(
+        ground_truth.get("title"),
+        ground_truth.get("description"),
+        ground_truth.get("evidence"),
+        ground_truth.get("attack_scenario"),
+    )
+    agent_tokens = token_set(
+        agent_finding.get("title"),
+        agent_finding.get("description"),
+        agent_finding.get("evidence"),
+        agent_finding.get("attack_scenario"),
+    )
+    overlap = token_overlap_score(gt_tokens, agent_tokens)
+    if overlap >= 0.3:
+        score += 0.2
+        reasons.append(f"strong text overlap ({overlap:.2f})")
+    elif overlap >= 0.18:
+        score += 0.12
+        reasons.append(f"moderate text overlap ({overlap:.2f})")
+    elif overlap >= 0.1:
+        score += 0.06
+        reasons.append(f"weak text overlap ({overlap:.2f})")
+
+    gt_owasp = normalize_text(ground_truth.get("owasp_category"))
+    agent_owasp = normalize_text(agent_finding.get("owasp_category"))
+    if gt_owasp and agent_owasp and gt_owasp.split()[0:1] == agent_owasp.split()[0:1]:
+        score += 0.1
+        reasons.append("same OWASP category")
+
+    gt_line = ground_truth.get("line")
+    agent_line = agent_finding.get("line")
+    if isinstance(gt_line, int) and isinstance(agent_line, int) and abs(gt_line - agent_line) <= 5:
+        score += 0.05
+        reasons.append("nearby line")
+
+    return min(score, 1.0), reasons
+
+
+def compare_against_ground_truth(
+    report: dict[str, Any], ground_truth: Any | None, match_threshold: float = 0.55
+) -> dict[str, Any]:
+    if not isinstance(ground_truth, dict):
+        return {
+            "available": False,
+            "found_findings": [],
+            "missing_findings": [],
+            "unmatched_agent_findings": [],
+            "recall": None,
+            "precision": None,
+        }
+
+    gt_findings = [f for f in ground_truth.get("findings", []) if isinstance(f, dict)]
+    agent_findings = [f for f in report.get("findings", []) if isinstance(f, dict)]
+    unmatched_agent_indexes = set(range(len(agent_findings)))
+    matches: list[FindingMatch] = []
+    missing: list[dict[str, Any]] = []
+
+    for gt in gt_findings:
+        best_index: int | None = None
+        best_score = 0.0
+        best_reasons: list[str] = []
+        for index in unmatched_agent_indexes:
+            candidate = agent_findings[index]
+            score, reasons = score_finding_match(gt, candidate)
+            if score > best_score:
+                best_index = index
+                best_score = score
+                best_reasons = reasons
+
+        if best_index is not None and best_score >= match_threshold:
+            unmatched_agent_indexes.remove(best_index)
+            matches.append(
+                FindingMatch(
+                    ground_truth_id=str(gt.get("id") or ""),
+                    agent_id=str(agent_findings[best_index].get("id") or ""),
+                    confidence=best_score,
+                    reasons=best_reasons,
+                )
+            )
+        else:
+            missing.append(
+                {
+                    "id": gt.get("id"),
+                    "title": gt.get("title"),
+                    "severity": gt.get("severity"),
+                    "cwe": gt.get("cwe"),
+                    "file": gt.get("file"),
+                    "best_match_confidence": round(best_score, 3),
+                    "best_match_reasons": best_reasons,
+                }
+            )
+
+    unmatched_agent_findings = [
+        {
+            "id": agent_findings[index].get("id"),
+            "title": agent_findings[index].get("title"),
+            "severity": agent_findings[index].get("severity"),
+            "cwe": agent_findings[index].get("cwe"),
+            "file": agent_findings[index].get("file"),
+        }
+        for index in sorted(unmatched_agent_indexes)
+    ]
+
+    recall = len(matches) / len(gt_findings) if gt_findings else 1.0
+    precision = len(matches) / len(agent_findings) if agent_findings else (1.0 if not gt_findings else 0.0)
+
+    return {
+        "available": True,
+        "match_threshold": match_threshold,
+        "ground_truth_count": len(gt_findings),
+        "agent_finding_count": len(agent_findings),
+        "found_count": len(matches),
+        "missing_count": len(missing),
+        "unmatched_agent_count": len(unmatched_agent_findings),
+        "recall": round(recall, 3),
+        "precision": round(precision, 3),
+        "found_findings": [match.to_dict() for match in matches],
+        "missing_findings": missing,
+        "unmatched_agent_findings": unmatched_agent_findings,
+    }
+
+
 def collect_referenced_evidence(report: dict[str, Any], source_root: Path | None) -> list[dict[str, Any]]:
     if source_root is None or not source_root.exists():
         return []
+
+    source_root = source_root.resolve()
 
     evidence: list[dict[str, Any]] = []
     for finding in report.get("findings", []):
@@ -222,9 +441,10 @@ def collect_referenced_evidence(report: dict[str, Any], source_root: Path | None
         if not relative_file:
             continue
 
-        candidate = (source_root / relative_file).resolve()
+        normalized_file = normalize_file_path(relative_file)
+        candidate = (source_root / normalized_file).resolve()
         try:
-            candidate.relative_to(source_root.resolve())
+            candidate.relative_to(source_root)
         except ValueError:
             evidence.append(
                 {
@@ -240,6 +460,7 @@ def collect_referenced_evidence(report: dict[str, Any], source_root: Path | None
                 {
                     "id": finding.get("id"),
                     "file": relative_file,
+                    "normalized_file": normalized_file,
                     "error": "Referenced file does not exist under source root.",
                 }
             )
@@ -292,6 +513,7 @@ class SASTReportJudge:
         source_evidence: list[dict[str, Any]],
         candidate_findings: Any | None = None,
         ground_truth: Any | None = None,
+        ground_truth_coverage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         prompt = PromptTemplate.from_template(
             """
@@ -320,6 +542,9 @@ reasonable OWASP/CWE categories, and include concrete attack scenarios and fixes
 ## Optional Ground Truth
 {ground_truth}
 
+## Deterministic Ground Truth Coverage
+{ground_truth_coverage}
+
 ## Evaluation Dimensions
 Score each dimension from 0.0 to 1.0:
 1. summary_score: Summary counts are accurate and useful.
@@ -343,8 +568,11 @@ Use these weights for overall_score:
 - precision_score: 0.07
 - recall_score: 0.05
 
-If candidate findings or ground truth are absent, judge precision and recall from
-the report and provided source evidence only, and mention confidence limits.
+Use Deterministic Ground Truth Coverage as the source of truth for whether a
+ground-truth item was found or missed. Do not mark a ground-truth finding as
+missing if it appears in found_findings. If candidate findings or ground truth
+are absent, judge precision and recall from the report and provided source
+evidence only, and mention confidence limits.
 
 Return ONLY valid JSON in this exact shape:
 {{
@@ -371,6 +599,7 @@ Return ONLY valid JSON in this exact shape:
       "feedback": "finding-specific feedback"
     }}
   ],
+  "found_findings": ["ground truth finding id found by the agent"],
   "missing_findings": ["important issue the report missed"],
   "false_positives": ["finding id or title that appears unsupported"],
   "feedback": "overall report-quality feedback"
@@ -388,6 +617,9 @@ Return ONLY valid JSON in this exact shape:
             else "Not provided",
             ground_truth=json.dumps(ground_truth, indent=2)
             if ground_truth is not None
+            else "Not provided",
+            ground_truth_coverage=json.dumps(ground_truth_coverage, indent=2)
+            if ground_truth_coverage is not None
             else "Not provided",
         )
 
@@ -448,6 +680,7 @@ async def evaluate_report_request_async(request: ReportEvaluationRequest) -> dic
         if request.ground_truth_path
         else None
     )
+    ground_truth_coverage = compare_against_ground_truth(report, ground_truth)
 
     judge = SASTReportJudge(
         JudgeConfig(model_id=request.judge_model, temperature=request.temperature)
@@ -458,8 +691,23 @@ async def evaluate_report_request_async(request: ReportEvaluationRequest) -> dic
         source_evidence=source_evidence,
         candidate_findings=candidate_findings,
         ground_truth=ground_truth,
+        ground_truth_coverage=ground_truth_coverage,
     )
     evaluation["local_validation"] = validation.to_dict()
+    evaluation["ground_truth_coverage"] = ground_truth_coverage
+
+    if ground_truth_coverage.get("available"):
+        evaluation["found_findings"] = [
+            f"{match['ground_truth_id']} found as {match['agent_id']} ({match['confidence']})"
+            for match in ground_truth_coverage["found_findings"]
+        ]
+        evaluation["missing_findings"] = [
+            finding_label(finding)
+            for finding in ground_truth_coverage["missing_findings"]
+        ]
+        scores = evaluation.setdefault("scores", {})
+        scores["recall_score"] = ground_truth_coverage["recall"]
+        scores["precision_score"] = ground_truth_coverage["precision"]
 
     if request.output_path:
         write_json_file(Path(request.output_path), evaluation)

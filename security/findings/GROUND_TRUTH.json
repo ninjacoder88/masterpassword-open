@@ -1,10 +1,10 @@
 {
   "summary": {
-    "total_findings": 12,
+    "total_findings": 7,
     "critical": 0,
     "high": 5,
-    "medium": 6,
-    "low": 1
+    "medium": 2,
+    "low": 0
   },
   "findings": [
     {
@@ -74,42 +74,16 @@
     },
     {
       "id": "FINDING-006",
-      "title": "Session cookies are not configured with Secure or SameSite protections",
-      "severity": "Medium",
-      "owasp_category": "A05 - Security Misconfiguration",
-      "cwe": "CWE-614",
-      "file": "MasterPassword/Startup.cs",
-      "line": 25,
-      "description": "The session cookie is configured as HttpOnly and essential, but the code does not set Cookie.SecurePolicy or SameSite. Session cookies can be sent without explicit transport and cross-site constraints.",
-      "evidence": "services.AddSession(options =>\n{\n    options.IdleTimeout = TimeSpan.FromMinutes(60);\n    options.Cookie.HttpOnly = true;\n    options.Cookie.IsEssential = true;\n});",
-      "attack_scenario": "If the app is reachable over HTTP or behind a misconfigured proxy, the browser may send the session cookie over an insecure channel. Missing SameSite also weakens protection against cross-site requests that rely on ambient session cookies.",
-      "remediation": "Set options.Cookie.SecurePolicy = CookieSecurePolicy.Always and options.Cookie.SameSite = SameSiteMode.Strict or Lax based on the product flow. Ensure production terminates only HTTPS traffic."
-    },
-    {
-      "id": "FINDING-007",
-      "title": "Application pipeline does not enforce HTTPS or HSTS",
-      "severity": "Medium",
-      "owasp_category": "A05 - Security Misconfiguration",
-      "cwe": "CWE-319",
-      "file": "MasterPassword/Startup.cs",
-      "line": 67,
-      "description": "The ASP.NET request pipeline serves static files, routing, sessions, authentication, and authorization without UseHttpsRedirection or UseHsts. Sensitive login, session, and vault traffic is not enforced as HTTPS by the application.",
-      "evidence": "app.UseStaticFiles()\n    .UseRouting()\n    .UseSession();\n\napp.UseAuthentication()\n    .UseAuthorization()\n    .UseHealthChecks(\"/health\");",
-      "attack_scenario": "A deployment or reverse-proxy mistake can expose the application over plain HTTP, allowing network attackers to capture credentials, bearer tokens, session cookies, and decrypted vault data in transit.",
-      "remediation": "Add UseHttpsRedirection and production UseHsts, configure forwarded headers correctly behind proxies, and reject insecure requests at the edge."
-    },
-    {
-      "id": "FINDING-008",
-      "title": "Logout is a state-changing unauthenticated GET endpoint",
-      "severity": "Medium",
+     "title": "Missing Authorization on Favicon Retrieval Endpoint",
+      "severity": "High",
       "owasp_category": "A01 - Broken Access Control",
-      "cwe": "CWE-352",
-      "file": "MasterPassword/Controllers/API/v1/PrimaryAccountsController.cs",
-      "line": 49,
-      "description": "The logout action changes server-side token state and session state, but it is exposed as GET and has no Authorize attribute. This makes it vulnerable to cross-site request triggering and inconsistent authorization behavior.",
-      "evidence": "[HttpGet(\"Logout\")]\npublic async Task<IActionResult> Logout() =>\n    await ActionHandler.HandleAsync(async () =>\n    {\n        LogoutResponse response = await LogoutRequestHandler.HandleAsync(new LogoutRequest() { Id = HttpContext.GetUserId() });\n        HttpContext.Logout();\n        return response;\n    });",
-      "attack_scenario": "An attacker can embed an image or link to /api/PrimaryAccounts/Logout. When a logged-in victim's browser requests it, the application can clear the victim's session and token without user intent.",
-      "remediation": "Require authentication for logout, change it to POST, and enforce CSRF protections or an anti-forgery token for cookie/session-backed flows."
+      "cwe": "CWE-285",
+      "file": "/src/MasterPassword/Controllers/API/v1/FaviconsController.cs",
+      "line": 15,
+      "description": "The Get endpoint in FaviconsController is missing authorization, allowing any unauthenticated user to retrieve favicons.",
+      "evidence": "[HttpGet]",
+      "attack_scenario": "An attacker can access favicon data without authentication, potentially exposing internal resources or enabling enumeration attacks. This could reveal information about the application's structure or internal systems.",
+      "remediation": "Add the [Authorize] attribute to the Get method in FaviconsController.cs to require authentication before allowing favicon retrieval."
     },
     {
       "id": "FINDING-009",
@@ -123,45 +97,6 @@
       "evidence": "//todo: add more validation relating to the secondary account belonging to the primary account\n...\nvar secondaryAccount = await Repository.LoadSecondaryAccountByIdAsync(request.SecondaryAccountId);\n...\nvar note = new Note { Title = encryptedTitle, Description = encryptedDescription, SecondaryAccountId = secondaryAccount._id.ToString() };",
       "attack_scenario": "An authenticated attacker who obtains or guesses a victim secondary account id can create notes attached to the victim's account. The victim may later load corrupted or attacker-controlled encrypted note data, causing integrity loss or denial of service for that account item.",
       "remediation": "Before creating the note, load the secondary account and require secondaryAccount.PrimaryAccountId == request.PrimaryAccountId. Return a generic authorization failure when ownership does not match."
-    },
-    {
-      "id": "FINDING-010",
-      "title": "Public favicon refresh endpoint can trigger server-side requests",
-      "severity": "Medium",
-      "owasp_category": "A10 - Server-Side Request Forgery",
-      "cwe": "CWE-918",
-      "file": "MasterPassword/Controllers/API/v1/FaviconsController.cs",
-      "line": 13,
-      "description": "The favicon refresh endpoint has no Authorize attribute and calls a handler that sends outbound HTTP requests to hosts and URLs stored from user-controlled account URLs. This creates a public trigger for server-side requests.",
-      "evidence": "[HttpGet]\npublic async Task<IActionResult> Get() => await ActionHandler.HandleAsync(async () =>\n    await UpdateFaviconRequestHandler.HandleAsync(new UpdateFaviconRequest()));",
-      "attack_scenario": "An attacker can register, store a secondary account URL pointing at an internal host, and then call the unauthenticated favicon endpoint to make the server request internal HTTPS resources such as https://localhost/favicon.ico or cloud metadata-style hostnames if reachable.",
-      "remediation": "Require authorization for favicon refresh, move refresh to a controlled background job, validate and allowlist outbound hosts, reject private/link-local/loopback addresses, and set strict timeout and response-size limits."
-    },
-    {
-      "id": "FINDING-011",
-      "title": "Raw exception messages are returned to clients",
-      "severity": "Low",
-      "owasp_category": "A05 - Security Misconfiguration",
-      "cwe": "CWE-209",
-      "file": "MasterPassword/Controllers/API/v1/FaviconsController.cs",
-      "line": 26,
-      "description": "The shared ActionHandler returns ExceptionResponse(ex.Message) directly to API clients. Internal parse, database, crypto, and network errors can leak implementation details useful for further attacks.",
-      "evidence": "catch(Exception ex)\n{\n    return new JsonResult(new ExceptionResponse(ex.Message));\n}",
-      "attack_scenario": "An attacker can submit malformed ids, ciphertext-dependent inputs, or invalid URLs and use returned exception text to learn internal object id formats, dependency behavior, stack-sensitive error conditions, or network access details.",
-      "remediation": "Return a generic error message and appropriate status code to clients. Log detailed exception information server-side with request correlation ids."
-    },
-    {
-      "id": "FINDING-012",
-      "title": "Account lockout can be abused for denial of service",
-      "severity": "Medium",
-      "owasp_category": "A07 - Identification and Authentication Failures",
-      "cwe": "CWE-307",
-      "file": "MasterPassword.BusinessLogic/RequestHandlers/Login/LoginRequestHandler.cs",
-      "line": 38,
-      "description": "Failed login attempts permanently lock the account once FailedLoginCount exceeds five, and the check happens before password verification. There is no time window, unlock workflow, IP throttling, or reset path for a legitimate password after lockout.",
-      "evidence": "if (primaryAccountByEmail.FailedLoginCount > 5)\n    return new LoginResponse(false) { ErrorMessage = \"Login failed. Account has been locked out due to too many failed logins.\" };\n\nif (!Encryptor.PlainTextMatchesHash(request.Password, primaryAccountByEmail.Password))\n{\n    await Repository.UpdateFailedLoginCountAsync(primaryAccountByEmail._id, primaryAccountByEmail.FailedLoginCount + 1);",
-      "attack_scenario": "An attacker who knows or enumerates a victim email address can submit six wrong passwords and prevent the victim from logging in even with the correct password, causing account-level denial of service.",
-      "remediation": "Use rate limiting by account, IP, and device; apply temporary exponential backoff instead of permanent lockout; provide a secure unlock or recovery flow; and avoid revealing lockout state unnecessarily."
     }
   ]
 }
