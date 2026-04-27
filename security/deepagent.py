@@ -12,7 +12,7 @@ import boto3
 from botocore.config import Config
 
 
-load_dotenv()
+load_dotenv(overrides=True)
 
 # Git repo setup
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
