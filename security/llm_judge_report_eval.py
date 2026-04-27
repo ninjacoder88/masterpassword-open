@@ -104,6 +104,17 @@ class JudgeConfig:
     temperature: float = 0.1
 
 
+@dataclass
+class ReportEvaluationRequest:
+    report_path: str | Path
+    source_root: str | Path | None = DEFAULT_SOURCE_ROOT
+    candidate_findings_path: str | Path | None = None
+    ground_truth_path: str | Path | None = None
+    judge_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    output_path: str | Path | None = None
+    temperature: float = 0.1
+
+
 def strip_json_fence(text: str) -> str:
     raw = text.strip()
     if raw.startswith("```json"):
@@ -117,6 +128,11 @@ def strip_json_fence(text: str) -> str:
 
 def load_json_file(path: Path) -> Any:
     return json.loads(strip_json_fence(path.read_text(encoding="utf-8")))
+
+
+def write_json_file(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + os.linesep, encoding="utf-8")
 
 
 def validate_report(report: Any) -> LocalValidation:
@@ -386,6 +402,94 @@ Return ONLY valid JSON in this exact shape:
         return evaluation
 
 
+async def evaluate_report_file_async(
+    report_path: str | Path,
+    source_root: str | Path | None = DEFAULT_SOURCE_ROOT,
+    candidate_findings_path: str | Path | None = None,
+    ground_truth_path: str | Path | None = None,
+    judge_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    output_path: str | Path | None = None,
+    temperature: float = 0.1,
+) -> dict[str, Any]:
+    """Evaluate a SAST report file and optionally persist the judge result."""
+    request = ReportEvaluationRequest(
+        report_path=report_path,
+        source_root=source_root,
+        candidate_findings_path=candidate_findings_path,
+        ground_truth_path=ground_truth_path,
+        judge_model=judge_model,
+        output_path=output_path,
+        temperature=temperature,
+    )
+    return await evaluate_report_request_async(request)
+
+
+async def evaluate_report_request_async(request: ReportEvaluationRequest) -> dict[str, Any]:
+    """Evaluate a SAST report from a structured request object."""
+    report_path = Path(request.report_path)
+    if not report_path.exists():
+        raise FileNotFoundError(f"Report file not found: {report_path}")
+
+    report = load_json_file(report_path)
+    if not isinstance(report, dict):
+        raise ValueError("Report JSON root must be an object.")
+
+    validation = validate_report(report)
+    source_root = Path(request.source_root).resolve() if request.source_root else None
+    source_evidence = collect_referenced_evidence(report, source_root)
+
+    candidate_findings = (
+        load_json_file(Path(request.candidate_findings_path))
+        if request.candidate_findings_path
+        else None
+    )
+    ground_truth = (
+        load_json_file(Path(request.ground_truth_path))
+        if request.ground_truth_path
+        else None
+    )
+
+    judge = SASTReportJudge(
+        JudgeConfig(model_id=request.judge_model, temperature=request.temperature)
+    )
+    evaluation = await judge.evaluate_report(
+        report=report,
+        local_validation=validation,
+        source_evidence=source_evidence,
+        candidate_findings=candidate_findings,
+        ground_truth=ground_truth,
+    )
+    evaluation["local_validation"] = validation.to_dict()
+
+    if request.output_path:
+        write_json_file(Path(request.output_path), evaluation)
+
+    return evaluation
+
+
+def evaluate_report_file(
+    report_path: str | Path,
+    source_root: str | Path | None = DEFAULT_SOURCE_ROOT,
+    candidate_findings_path: str | Path | None = None,
+    ground_truth_path: str | Path | None = None,
+    judge_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    output_path: str | Path | None = None,
+    temperature: float = 0.1,
+) -> dict[str, Any]:
+    """Synchronous wrapper for scripts that are not already running an event loop."""
+    return asyncio.run(
+        evaluate_report_file_async(
+            report_path=report_path,
+            source_root=source_root,
+            candidate_findings_path=candidate_findings_path,
+            ground_truth_path=ground_truth_path,
+            judge_model=judge_model,
+            output_path=output_path,
+            temperature=temperature,
+        )
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Evaluate a DeepAgent SAST JSON report with an LLM judge."
@@ -422,12 +526,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 async def async_main() -> int:
     args = build_arg_parser().parse_args()
 
-    report_path = Path(args.report)
-    if not report_path.exists():
-        raise FileNotFoundError(f"Report file not found: {report_path}")
-
     try:
-        report = load_json_file(report_path)
+        evaluation = await evaluate_report_file_async(
+            report_path=args.report,
+            source_root=args.source_root,
+            candidate_findings_path=args.candidate_findings,
+            ground_truth_path=args.ground_truth,
+            judge_model=args.judge_model,
+            output_path=args.output,
+        )
     except json.JSONDecodeError as exc:
         validation = LocalValidation(
             parseable_json=False,
@@ -438,31 +545,11 @@ async def async_main() -> int:
         print(json.dumps({"local_validation": validation.to_dict()}, indent=2))
         return 1
 
-    validation = validate_report(report)
-    source_root = Path(args.source_root).resolve() if args.source_root else None
-    source_evidence = collect_referenced_evidence(report, source_root)
-
-    candidate_findings = load_json_file(Path(args.candidate_findings)) if args.candidate_findings else None
-    ground_truth = load_json_file(Path(args.ground_truth)) if args.ground_truth else None
-
-    judge = SASTReportJudge(JudgeConfig(model_id=args.judge_model))
-    evaluation = await judge.evaluate_report(
-        report=report,
-        local_validation=validation,
-        source_evidence=source_evidence,
-        candidate_findings=candidate_findings,
-        ground_truth=ground_truth,
-    )
-
-    evaluation["local_validation"] = validation.to_dict()
     rendered = json.dumps(evaluation, indent=2)
     print(rendered)
 
     if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(rendered + os.linesep, encoding="utf-8")
-        print(f"\nEvaluation saved: {output_path}")
+        print(f"\nEvaluation saved: {Path(args.output)}")
 
     return 0
 
