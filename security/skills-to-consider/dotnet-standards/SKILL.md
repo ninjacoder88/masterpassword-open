@@ -60,12 +60,6 @@ Skip files matching these patterns — applying fixes to generated or migrated c
 - Execute **each sub-skill below in order**, sequentially, for every file.
 - After completing all sub-skills, output a **consolidated findings summary table** grouped by file and sub-skill.
 - For each finding, **write the corrected code directly to the file** using the file editing tools. Use `// ...existing code...` to preserve unchanged sections.
-- **APPLY ALL CHANGES after the summary table** — do not stop at summarising. Every finding must result in an implemented edit.
-- **DO NOT STOP** until every sub-skill has been applied to every file in scope and every finding has been fixed.
-- If context limits are reached, emit a **checkpoint summary** listing:
-  - Sub-skills completed
-  - Files fully reviewed
-  - Remaining files and sub-skills
   Then await the next prompt to continue from where you left off.
 
 ## Sub-Skills (execute in order)
