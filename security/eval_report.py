@@ -6,8 +6,8 @@ This evaluates the final JSON report produced by security/deepagent.py's
 REPORT_PROMPT. It does not run the SAST agent; it scores an existing report.
 
 Usage:
-    uv run python security/llm_judge_report_eval.py --report security_findings/sast_run.json
-    uv run python security/llm_judge_report_eval.py --report report.json --source-root security/repo --output eval.json
+    uv run python security/eval_report.py --report security/findings/sast_run.json
+    uv run python security/eval_report.py --report report.json --ground-truth security/findings/GROUND_TRUTH.json --output eval.json
 """
 
 from __future__ import annotations

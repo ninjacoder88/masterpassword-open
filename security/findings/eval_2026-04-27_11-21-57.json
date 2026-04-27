@@ -1,0 +1,44 @@
+{
+  "scores": {
+    "summary_score": 0.0,
+    "finding_validity_score": 0.0,
+    "severity_score": 0.0,
+    "taxonomy_score": 0.0,
+    "evidence_score": 0.0,
+    "attack_scenario_score": 0.0,
+    "remediation_score": 0.0,
+    "precision_score": 1.0,
+    "recall_score": 0.0,
+    "overall_score": 0.05
+  },
+  "verdict": "fail",
+  "finding_reviews": [],
+  "missing_findings": [
+    "FINDING-001: Authentication tokens generated with predictable PRNG (CWE-338, High)",
+    "FINDING-002: Generated passwords use predictable PRNG (CWE-338, High)",
+    "FINDING-003: Vault encryption key derived by base64 truncation instead of KDF (CWE-916, High)",
+    "FINDING-004: Encrypted vault data lacks authenticated encryption (CWE-327, High)",
+    "FINDING-005: Master password policy permits four-character passwords (CWE-521, Medium)",
+    "FINDING-006: Session cookies lack Secure and SameSite protections (CWE-614, Medium)",
+    "FINDING-007: Application pipeline does not enforce HTTPS or HSTS (CWE-319, Medium)",
+    "FINDING-008: Logout is a state-changing unauthenticated GET endpoint (CWE-352, Medium)",
+    "FINDING-009: Users can create notes on another user's secondary account (CWE-639, High)",
+    "FINDING-010: Public favicon refresh endpoint can trigger SSRF (CWE-918, Medium)",
+    "FINDING-011: Raw exception messages returned to clients (CWE-209, Low)",
+    "FINDING-012: Account lockout can be abused for denial of service (CWE-307, Medium)"
+  ],
+  "false_positives": [],
+  "feedback": "The agent produced a completely empty report with zero findings when ground truth contains 12 real, well-documented security issues across a password manager application. This represents a total failure of the SAST analysis.\n\nThe report structure is valid JSON and conforms to the required schema, which accounts for the precision_score of 1.0 (no false positives were reported). However, the recall is 0.0 because all 12 findings from ground truth were missed.\n\nGround truth findings are high-quality and actionable:\n- 5 High-severity findings including cryptographic failures (predictable PRNG for tokens/passwords, weak KDF, missing AEAD)\n- 6 Medium-severity findings including authentication/authorization flaws, misconfiguration, and SSRF\n- 1 Low-severity finding (information disclosure)\n\nEach ground truth finding includes:\n- Specific file paths and line numbers\n- Exact code evidence\n- Concrete attack scenarios with attacker actions and impact\n- Specific, implementable remediations\n- Correct OWASP and CWE mappings\n\nThe agent appears to have either:\n1. Not analyzed the source code at all\n2. Failed to detect any issues despite analyzing the code\n3. Encountered a fatal error that prevented finding generation\n\nFor a password manager application handling cryptographic operations, authentication, and sensitive data storage, this complete miss is a critical failure. The findings are not false positives (precision is perfect), but the recall failure is absolute and unacceptable for a security tool.",
+  "metadata": {
+    "evaluated_at": "2026-04-27T11:32:00.257573",
+    "judge_model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "local_validation_passed": true
+  },
+  "local_validation": {
+    "parseable_json": true,
+    "passed": true,
+    "structure_errors": [],
+    "summary_errors": [],
+    "finding_errors": []
+  }
+}
