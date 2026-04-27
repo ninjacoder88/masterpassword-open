@@ -66,6 +66,21 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # …/security
 WORKSPACE_ROOT = os.path.dirname(SCRIPT_DIR)
 FINDINGS_DIR = os.path.join(SCRIPT_DIR, "findings")  # security/findings/
 
+# ------------------------------------------------------------------------------
+# Skills Setup
+# ------------------------------------------------------------------------------
+# Skills are directories containing SKILL.md files with frontmatter metadata
+# and instructions. DeepAgent loads these and injects them into the agent's
+# context when relevant.
+skills_dir = os.path.join(SCRIPT_DIR, "skills")
+
+print(f"Skills directory: {skills_dir}")
+print("Skills loaded:")
+for skill_name in os.listdir(skills_dir):
+    skill_path = os.path.join(skills_dir, skill_name, "SKILL.md")
+    if os.path.exists(skill_path):
+        print(f"  - {skill_name}")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM
 # ─────────────────────────────────────────────────────────────────────────────
@@ -786,6 +801,7 @@ def run_phase(
         model=llm,
         tools=extra_tools or [],
         backend=backend,
+        skills=[skills_dir],
         system_prompt=system_prompt,
     )
     final_output = ""
