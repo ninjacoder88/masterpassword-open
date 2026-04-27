@@ -1,0 +1,50 @@
+{
+  "summary": {
+    "total_findings": 3,
+    "critical": 0,
+    "high": 2,
+    "medium": 1,
+    "low": 0
+  },
+  "findings": [
+    {
+      "id": "FINDING-001",
+      "title": "Missing Authorization on Password Generation Endpoint",
+      "severity": "High",
+      "owasp_category": "A01 - Broken Access Control",
+      "cwe": "CWE-285",
+      "file": "/src/MasterPassword/Controllers/API/v1/PasswordController.cs",
+      "line": 15,
+      "description": "The Get endpoint in PasswordController is missing authorization, allowing any unauthenticated user to generate passwords.",
+      "evidence": "[HttpGet]",
+      "attack_scenario": "An attacker can make unlimited requests to the password generation endpoint, potentially exhausting server resources or generating passwords for malicious purposes. This could lead to denial-of-service or abuse of the password generation service.",
+      "remediation": "Add the [Authorize] attribute to the Get method in PasswordController.cs to require authentication before allowing password generation."
+    },
+    {
+      "id": "FINDING-002",
+      "title": "Missing Authorization on Favicon Retrieval Endpoint",
+      "severity": "High",
+      "owasp_category": "A01 - Broken Access Control",
+      "cwe": "CWE-285",
+      "file": "/src/MasterPassword/Controllers/API/v1/FaviconsController.cs",
+      "line": 15,
+      "description": "The Get endpoint in FaviconsController is missing authorization, allowing any unauthenticated user to retrieve favicons.",
+      "evidence": "[HttpGet]",
+      "attack_scenario": "An attacker can access favicon data without authentication, potentially exposing internal resources or enabling enumeration attacks. This could reveal information about the application's structure or internal systems.",
+      "remediation": "Add the [Authorize] attribute to the Get method in FaviconsController.cs to require authentication before allowing favicon retrieval."
+    },
+    {
+      "id": "FINDING-003",
+      "title": "Missing Authorization on Session Refresh Endpoint",
+      "severity": "Medium",
+      "owasp_category": "A01 - Broken Access Control",
+      "cwe": "CWE-285",
+      "file": "/src/MasterPassword/Controllers/API/v1/SessionController.cs",
+      "line": 32,
+      "description": "The RefeshSession endpoint is missing authorization, allowing any unauthenticated user to refresh their session.",
+      "evidence": "[HttpGet(\"Refresh\")]",
+      "attack_scenario": "An attacker can make unauthorized session refresh requests, potentially extending session lifetimes or bypassing authentication mechanisms. This could allow unauthorized access to protected resources through session manipulation.",
+      "remediation": "Add the [Authorize] attribute to the RefeshSession method in SessionController.cs to require authentication before allowing session refresh."
+    }
+  ]
+}

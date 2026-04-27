@@ -841,18 +841,33 @@ def _llm_call(system_prompt: str, task: str, label: str = "") -> str:
 
     msgs = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
     prefix = f"  [{label}] " if label else "  "
-    chunks: list[str] = []
     token_count = 0
     t0 = time.monotonic()
 
+    parts: list[str] = []
+    last_milestone = 0
+
     print(f"{prefix}streaming", end="", flush=True)
     for chunk in llm.stream(msgs):
-        text = chunk.content if hasattr(chunk, "content") else str(chunk)
+        # ChatBedrockConverse yields content as either a plain str or a list of
+        # content-block dicts: [{"type": "text", "text": "..."}].  Handle both.
+        raw = chunk.content if hasattr(chunk, "content") else ""
+        if isinstance(raw, list):
+            text = "".join(
+                block.get("text", "") if isinstance(block, dict) else str(block)
+                for block in raw
+            )
+        elif isinstance(raw, str):
+            text = raw
+        else:
+            text = str(raw)
+
         if text:
-            chunks.append(text)
-            token_count += len(text.split())  # word-level approximation
-            # Print a progress marker every 50 approximate tokens
-            if token_count % 50 < len(text.split()):
+            parts.append(text)
+            token_count += len(text.split())
+            # Heartbeat every ~50 approximate tokens
+            if token_count - last_milestone >= 50:
+                last_milestone = token_count
                 elapsed = time.monotonic() - t0
                 print(
                     f"\n{prefix}  ~{token_count} tokens ({elapsed:.0f}s)",
@@ -862,7 +877,7 @@ def _llm_call(system_prompt: str, task: str, label: str = "") -> str:
 
     elapsed = time.monotonic() - t0
     print(f"\n{prefix}done (~{token_count} tokens, {elapsed:.1f}s)", flush=True)
-    return "".join(chunks)
+    return "".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
