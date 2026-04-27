@@ -1,5 +1,5 @@
 ---
-title: 'A01: Broken Access Control'
+name: 'A01: Broken Access Control'
 description: OWASP Web Top 10 reference for broken access control vulnerabilities including privilege escalation and unauthorized resource access
 ---
 
